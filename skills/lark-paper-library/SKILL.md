@@ -109,7 +109,11 @@ sqlite3 mrl/mrl-index.sqlite3 "SELECT key||': '||value FROM index_meta WHERE key
 Table `mrl_index`, one row per verified PDF. Match on the pre-normalized
 columns (`title_norm`, `first_author_norm`); show the user the original
 `title`/`authors`. `authors` holds the full Crossref-verified author list
-where available; `first_author_last` is always populated.
+where available; `first_author_last` is always populated. Data semantics:
+a `doi` value not starting with `10.` is an internal manuscript ID (e.g.
+`AMJ_20220421` for an in-press paper) — never cite it as a DOI; and rows
+with empty `authors` (in-press items) are only findable via
+`first_author_norm`, not co-author search.
 
 ```bash
 sqlite3 -json mrl/mrl-index.sqlite3 \
