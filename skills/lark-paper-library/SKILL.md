@@ -1,6 +1,6 @@
 ---
 name: lark-paper-library
-version: 0.3.0
+version: 1.0.0
 description: "Search and download academic paper PDFs from the Management Research Library — a shared, read-only Feishu (Lark) Drive folder indexed by a verified SQLite catalog. Use when the user asks to find, locate, list, or download papers from the shared library by title, author, year, journal, DOI, or keyword. Strictly read-only: never modifies the library."
 metadata:
   requires:
