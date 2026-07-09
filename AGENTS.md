@@ -13,3 +13,4 @@ The contract in brief (the skill is authoritative):
 5. Never guess paper identity — ambiguous matches go back to the user as candidates
 6. Never mirror the library; never pass `--yes`; report real verified counts
 7. Keep the folder URL and all tokens out of anything public
+8. Check [`FAQ.md`](FAQ.md) before asking the maintainer; file library/content issues as records in the `feedback` table (the only other permitted write, alongside download logging), and connector code/docs issues as GitHub Issues — then tell your user what you filed

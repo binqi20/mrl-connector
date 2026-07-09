@@ -51,4 +51,11 @@ Modifying, moving, deleting, or uploading is prohibited and **enforced by the pl
 - Keep the folder URL private; never commit it, tokens, or `CONNECT.md` to public repositories
 - Library contents are for research use by group members; do not redistribute
 
-Questions or access requests: contact the maintainer.
+## Questions & feedback
+
+Read [FAQ.md](FAQ.md) first — setup, search technique, quota semantics, and common errors are covered there (a copy also lives inside the library at `_tracking/FAQ.md`).
+
+- **Library content & workflow** (missing papers, metadata errors, quota, feature ideas): your agent files a record in the `feedback` table next to the Download Log — the skill documents the exact command. The maintainer triages and writes a resolution you can check back on.
+- **Connector code & docs** (this repo): open a GitHub Issue; pull requests welcome.
+
+Access requests: contact the maintainer.

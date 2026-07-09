@@ -85,7 +85,7 @@ lark-cli drive +download --file-token "$CONNECT_TOKEN" --output mrl/CONNECT.md -
 
 ## Hard rules (non-negotiable)
 
-1. **Read-only.** Never upload to, modify, rename, move, or delete anything under the library folder or `_tracking`. Do not call `drive +upload`, `+move`, `+delete`, `+push`, `+sync`, `files patch`, or any Base write command against library resources. Sole exception: appending records to the Download Log Base.
+1. **Read-only.** Never upload to, modify, rename, move, or delete anything under the library folder or `_tracking`. Do not call `drive +upload`, `+move`, `+delete`, `+push`, `+sync`, `files patch`, or any Base write command against library resources. Sole exceptions: appending records to the Download Log Base — its `download_log` table (usage logging) and `feedback` table (reports/suggestions).
 2. **≤ 15 PDFs per download operation.** For larger requests, download at most 15, tell the user the cap, and continue only when they ask.
 3. **≤ 80 PDFs per rolling 30-hour window per user.** Check the ledger before every operation (Step 5). If the request exceeds the remainder, download only up to it and say when quota frees.
 4. **Verify every download** against the index `sha256` and `file_size`. A mismatched file must be deleted and reported — never silently kept.
@@ -218,6 +218,27 @@ download operations this session and tell the user (no log = no more downloads).
 | Resolve tokens / metadata | `drive:drive.metadata:readonly` | folder viewer |
 | Filename search fallback | `search:docs:read` | folder viewer |
 | Download Log read/append | `base:record:read` + `base:record:create` | edit on the Log Base only |
+
+## Questions & feedback
+
+Check `FAQ.md` (repo root; mirrored at `_tracking/FAQ.md`) before asking the
+maintainer — most setup, search, quota, and error questions are answered there.
+
+**Library / content / workflow issues** (missing paper, metadata error, quota
+problem, feature idea): append a record to the **`feedback` table** — it lives
+in the same Base as the Download Log, and is the second and last permitted write:
+
+```bash
+lark-cli base +record-batch-create --base-token {{LOG_BASE_TOKEN}} --table-id feedback \
+  --json '{"fields":["type","title","detail","paper_ref","agent","status"],
+           "rows":[["missing-paper","<short title>","<what happened / what you propose, incl. exact errors>","<DOI or paper_id, or empty>","<your product name>","new"]]}' --as user
+```
+
+`type` is one of: `bug`, `missing-paper`, `metadata-error`, `feature-request`,
+`question`, `other`. The maintainer triages `status` and writes `resolution` —
+re-query your record later for the answer. **Connector code/docs issues**
+(this skill, the repo): open a GitHub Issue on the repo instead. After filing
+anything, tell your user what you filed.
 
 ## Troubleshooting
 
