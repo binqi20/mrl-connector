@@ -59,3 +59,7 @@ Read [FAQ.md](FAQ.md) first — setup, search technique, quota semantics, and co
 - **Connector code & docs** (this repo): open a GitHub Issue; pull requests welcome.
 
 Access requests: contact the maintainer.
+
+## License
+
+[MIT](LICENSE) — the connector (this repository) is freely reusable as a pattern. The license covers this code and documentation only, not the library's contents: papers remain for members' research use and must not be redistributed.
