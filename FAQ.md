@@ -62,14 +62,18 @@ library yet — file a `missing-paper` feedback record (below) so the
 maintainer can ingest it.
 
 **Q: A row has an empty author list. Bug?**
-No — it's an in-press paper whose DOI isn't registered with Crossref yet
-(~180 rows). Those rows are findable by first author and title, but not by
-co-author search, until a future enrichment pass fills them.
+Usually not — most such rows (~180) are papers whose DOIs Crossref doesn't
+serve yet or that carry no DOI at all (working papers, some editorials). They
+are findable by first author and title, but not by co-author search, until an
+enrichment pass fills them. If the paper is demonstrably published with a
+working DOI, that IS worth a `metadata-error` feedback record.
 
 **Q: A `doi` value looks like `AMJ_20220421`. Can I cite that?**
-Never. Values not starting with `10.` are internal journal manuscript IDs for
-in-press papers — useful for identification, not citable. Cite only real
-`10.*` DOIs, or cite the paper conventionally by author/year/title/journal.
+Never — values not starting with `10.` are not DOIs. A 2026-07-10 audit found
+such values were mangled journal manuscript numbers whose real DOIs existed
+all along, and repaired every known case against Crossref. If you encounter
+one, don't cite it — file a `metadata-error` feedback record with the
+paper_id so the maintainer can repair it the same way.
 
 **Q: The search returned several plausible candidates.**
 Agents must show the candidates (title, authors, year, journal, DOI) and let
