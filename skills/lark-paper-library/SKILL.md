@@ -111,9 +111,12 @@ columns (`title_norm`, `first_author_norm`); show the user the original
 `title`/`authors`. `authors` holds the full Crossref-verified author list
 where available; `first_author_last` is always populated. Data semantics:
 a `doi` value not starting with `10.` is an internal manuscript ID (e.g.
-`AMJ_20220421` for an in-press paper) — never cite it as a DOI; and rows
+`AMJ_20220421` for an in-press paper) — never cite it as a DOI; rows
 with empty `authors` (in-press items) are only findable via
-`first_author_norm`, not co-author search.
+`first_author_norm`, not co-author search; and a non-empty `version_note`
+flags a non-final version (e.g. an online-first/publisher-proof copy of an
+in-press paper) — tell the user before they cite page numbers from such a
+copy. Empty `version_note` = no known caveat.
 
 ```bash
 sqlite3 -json mrl/mrl-index.sqlite3 \

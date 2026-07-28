@@ -84,6 +84,13 @@ Check `index_meta.built_at` (agents do this automatically). The index is
 rebuilt after each ingest batch. If it's older than ~7 days, very recent
 papers may be missing — mention it, don't conclude the paper doesn't exist.
 
+**Q: Is my downloaded PDF the final published version?**
+Check the row's `version_note` column: empty means no known caveat; a note
+like "publisher proof" or "online-first" means the paper is real and correctly
+identified but not yet the Version of Record — page numbers and the year may
+change at final publication. The library replaces such copies with the VOR
+when it appears (library policy).
+
 ## Downloading
 
 **Q: Why at most 15 PDFs per operation and 80 per 30 hours?**
