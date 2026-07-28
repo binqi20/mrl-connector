@@ -113,10 +113,12 @@ where available; `first_author_last` is always populated. Data semantics:
 a `doi` value not starting with `10.` is an internal manuscript ID (e.g.
 `AMJ_20220421` for an in-press paper) — never cite it as a DOI; rows
 with empty `authors` (in-press items) are only findable via
-`first_author_norm`, not co-author search; and a non-empty `version_note`
-flags a non-final version (e.g. an online-first/publisher-proof copy of an
-in-press paper) — tell the user before they cite page numbers from such a
-copy. Empty `version_note` = no known caveat.
+`first_author_norm`, not co-author search; and `version_note` carries the
+file's validation record: `publication_version=official_published_issue_pdf`
+(or an empty note) means you have the final published version; any mention of
+"proof", "online-first", or "superseded" means the copy is real and correctly
+identified but NOT the Version of Record — tell the user before they cite
+page numbers or the year from such a copy.
 
 ```bash
 sqlite3 -json mrl/mrl-index.sqlite3 \

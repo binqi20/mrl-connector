@@ -85,8 +85,10 @@ rebuilt after each ingest batch. If it's older than ~7 days, very recent
 papers may be missing — mention it, don't conclude the paper doesn't exist.
 
 **Q: Is my downloaded PDF the final published version?**
-Check the row's `version_note` column: empty means no known caveat; a note
-like "publisher proof" or "online-first" means the paper is real and correctly
+Check the row's `version_note` column — it holds the file's validation record.
+`publication_version=official_published_issue_pdf` (or an empty note) means
+you have the final published version. A note mentioning "proof",
+"online-first", or "superseded" means the paper is real and correctly
 identified but not yet the Version of Record — page numbers and the year may
 change at final publication. The library replaces such copies with the VOR
 when it appears (library policy).
