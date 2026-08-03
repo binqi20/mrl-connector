@@ -1,4 +1,4 @@
-# Agent instructions — Management Research Library connector v1.1.0
+# Agent instructions — Management Research Library connector v1.1.1
 
 Read and follow [`skills/lark-paper-library/SKILL.md`](skills/lark-paper-library/SKILL.md)
 exactly. Use its tested helper; do not recreate the workflow with ad hoc shell
@@ -26,6 +26,7 @@ Contract summary:
 8. Never guess identity, mirror the library, pass `--yes`, or weaken a
    controlled refusal.
 
-Maintainers must follow [`DEPLOYMENT.md`](DEPLOYMENT.md): compatible v1.1 index
-first, connector/FAQ second, public release last. The reviewed root `FAQ.md` is
-the direct deterministic FAQ publication input.
+Maintainers must follow [`DEPLOYMENT.md`](DEPLOYMENT.md): validate the compatible
+v1.1 index with the reviewed v1.1.1 helper first, publish connector/FAQ second,
+and publish the public release last. The reviewed root `FAQ.md` is the direct
+deterministic FAQ publication input.

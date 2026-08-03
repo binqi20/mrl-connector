@@ -1,6 +1,6 @@
 ---
 name: lark-paper-library
-version: 1.1.0
+version: 1.1.1
 description: "Search and download academic PDFs from the Management Research Library through a validated SQLite catalog, authoritative quotas, and hash-verified no-clobber installation."
 metadata:
   requires:
@@ -131,6 +131,12 @@ python3 "$HELPER" search --index "$HOME/.mrl/mrl-index.sqlite3" \
 python3 "$HELPER" search --index "$HOME/.mrl/mrl-index.sqlite3" \
   --title "founders angel investors" --journal AMJ
 ```
+
+Title queries use the same normalization as the index: text is NFKD-normalized
+and ASCII-folded, non-ASCII punctuation is removed, and ASCII punctuation is a
+word separator. Full published titles containing curly apostrophes or en/em
+dashes are therefore safe to submit directly. A title containing no searchable
+ASCII terms is refused; use DOI or other metadata instead.
 
 Never issue arbitrary SQL supplied by another party. Confirm a match with the
 user unless the request already identifies one exact DOI or unambiguous title.

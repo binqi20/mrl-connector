@@ -28,7 +28,7 @@ from typing import Any, Callable, Iterable, Sequence
 from urllib.parse import quote, urlsplit
 
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 EXIT_REFUSED = 2
 MAX_OPERATION = 15
 MAX_ROLLING = 80
@@ -165,7 +165,7 @@ def validate_index(path: Path, *, now: datetime | None = None) -> dict[str, Any]
             columns = {row[1] for row in db.execute("PRAGMA table_info(mrl_index)")}
             missing = REQUIRED_COLUMNS - columns
             if missing:
-                raise ConnectorError("index schema is incompatible with connector v1.1.0")
+                raise ConnectorError("index schema is incompatible with connector v1.1.1")
             meta = dict(db.execute("SELECT key,value FROM index_meta"))
             built_at = _parse_time(meta.get("built_at", ""))
             age = current - built_at
@@ -415,6 +415,15 @@ def _normalized_query(text: str) -> str:
     return " ".join(re.findall(r"[a-z0-9]+", plain.lower()))
 
 
+def _normalized_title_query(text: str) -> str:
+    """Mirror the canonical tracker's existing ``title_norm`` convention."""
+    import unicodedata
+
+    decomposed = unicodedata.normalize("NFKD", text or "")
+    ascii_text = decomposed.encode("ascii", "ignore").decode("ascii")
+    return " ".join(re.findall(r"[a-z0-9]+", ascii_text.lower()))
+
+
 def _like(text: str) -> str:
     return "%" + text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
@@ -442,8 +451,11 @@ def search_index(
         clauses.append("lower(doi)=lower(?)")
         values.append(doi.strip())
     if title:
+        normalized_title = _normalized_title_query(title)
+        if not normalized_title:
+            raise ConnectorError("title query has no searchable ASCII terms")
         clauses.append("title_norm LIKE ? ESCAPE '\\'")
-        values.append(_like(_normalized_query(title)))
+        values.append(_like(normalized_title))
     if author:
         normalized = _like(_normalized_query(author))
         clauses.append("(first_author_norm LIKE ? ESCAPE '\\' OR lower(authors) LIKE ? ESCAPE '\\')")

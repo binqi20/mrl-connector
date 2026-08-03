@@ -1,4 +1,4 @@
-# Management Research Library — Connector v1.1.0
+# Management Research Library — Connector v1.1.1
 
 Connect an AI agent to the Management Research Library, a shared read-only
 Feishu (Lark) collection of academic PDFs indexed by a verified SQLite catalog.
@@ -10,7 +10,7 @@ URL privately. The private `_tracking/CONNECT.md` supplies runtime coordinates.
 
 ## Safety model
 
-Connector v1.1.0 is fail closed:
+Connector v1.1.1 is fail closed:
 
 - Paper search uses only a validated SQLite index; it never crawls Drive or
   falls back to filename search.
@@ -26,6 +26,8 @@ Connector v1.1.0 is fail closed:
 - Publication status is conservative: only the exact derived values
   `official_published_issue_pdf`, `in_press_or_online_pdf`, and `unknown` are
   recognized.
+- Title queries use the index's normalization convention, including accents,
+  curly apostrophes, and en/em dashes.
 
 Members hold view-only Drive permission. The connector's only permitted remote
 writes are appending to the `download_log` and `feedback` tables.
@@ -67,10 +69,11 @@ Never include library coordinates or credentials in either channel.
 
 ## Maintainer deployment
 
-Deployment is deliberately ordered: publish and read back a compatible v1.1
-index first, then overwrite CONNECT and the reviewed FAQ in place, and publish
-the public v1.1.0 repository release last. See [DEPLOYMENT.md](DEPLOYMENT.md) for
-the decision-complete order and byte-identical FAQ readback procedure.
+Deployment is deliberately ordered: validate the existing compatible v1.1
+index with the reviewed helper first, then overwrite CONNECT and the reviewed
+FAQ in place, and publish the public v1.1.1 repository release last. See
+[DEPLOYMENT.md](DEPLOYMENT.md) for the decision-complete order and
+byte-identical FAQ readback procedure.
 
 ## License
 

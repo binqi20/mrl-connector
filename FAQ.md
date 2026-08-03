@@ -1,4 +1,4 @@
-# Management Research Library — FAQ (connector v1.1.0)
+# Management Research Library — FAQ (connector v1.1.1)
 
 Coordinates are deliberately absent. The maintainer shares the library folder
 URL privately; `_tracking/CONNECT.md` supplies runtime tokens. Never place
@@ -29,6 +29,15 @@ Drive file, folder, index, or document.
 The helper downloads the exact pinned SQLite index token to a private temporary
 file, validates it, and searches it locally by DOI, title, author, year,
 journal, or keyword. It never crawls or searches the paper folders.
+
+**How are titles normalized?**
+
+Title searches use the same convention as the index. Text is NFKD-normalized
+and ASCII-folded, non-ASCII punctuation such as curly apostrophes and en/em
+dashes is removed, and ASCII punctuation separates words. This allows a full
+published title to match its stored `title_norm` value. A title containing no
+searchable ASCII terms is refused; use DOI, author, year, or journal metadata
+instead.
 
 **What if the index is unavailable or invalid?**
 
@@ -127,7 +136,7 @@ index by name or use Drive paper search.
 **Index is stale** — Ask the maintainer for an explicit MRL refresh. Do not
 bypass the seven-day policy.
 
-**Why might v1.1 refuse an older index?** — v1.1 requires the conservative
+**Why might v1.1.1 refuse an older index?** — v1.1 requires the conservative
 derived `publication_version` field. Maintainers publish and verify the
 compatible index before deploying the v1.1 connector and FAQ; see
 `DEPLOYMENT.md` in the public repository.

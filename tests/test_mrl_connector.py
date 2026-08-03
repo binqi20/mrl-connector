@@ -119,6 +119,37 @@ class IndexTests(unittest.TestCase):
             self.assertEqual([row["file_id"] for row in rows], [11])
             self.assertEqual(rows[0]["publication_version"], "official_published_issue_pdf")
 
+    def test_title_search_matches_tracker_normalization(self):
+        cases = [
+            ("Firm’s capability", "firms capability", "Firm’s capability"),
+            ("A core–periphery strategy", "a coreperiphery strategy", "core–periphery"),
+            ("A core—periphery strategy", "a coreperiphery strategy", "core—periphery"),
+            ("Café strategy", "cafe strategy", "Café strategy"),
+            ("Firm's capability", "firm s capability", "Firm's capability"),
+            ("R&D: growth", "r d growth", "R&D: growth"),
+        ]
+        for title, title_norm, query in cases:
+            with self.subTest(title=title):
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "index.sqlite3"
+                    make_index(path)
+                    db = sqlite3.connect(path)
+                    db.execute(
+                        "UPDATE mrl_index SET title=?,title_norm=?",
+                        (title, title_norm),
+                    )
+                    db.commit()
+                    db.close()
+                    rows = mrl.search_index(path, title=query, now=NOW)
+                    self.assertEqual([row["file_id"] for row in rows], [11])
+
+    def test_title_search_without_ascii_terms_refuses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "index.sqlite3"
+            make_index(path)
+            with self.assertRaisesRegex(mrl.ConnectorError, "no searchable ASCII"):
+                mrl.search_index(path, title="战略管理", now=NOW)
+
     def test_stale_index_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "index.sqlite3"
@@ -638,7 +669,8 @@ class PublicContractTests(unittest.TestCase):
     def test_frontmatter_version_is_exact(self):
         text = (ROOT / "skills/lark-paper-library/SKILL.md").read_text(encoding="utf-8")
         frontmatter = text.split("---", 2)[1]
-        self.assertIn("\nversion: 1.1.0\n", "\n" + frontmatter)
+        self.assertIn("\nversion: 1.1.1\n", "\n" + frontmatter)
+        self.assertEqual(mrl.VERSION, "1.1.1")
 
     def test_public_tree_has_no_forbidden_fallbacks(self):
         files = [ROOT / "AGENTS.md", ROOT / "README.md", ROOT / "FAQ.md", ROOT / "DEPLOYMENT.md", ROOT / "skills/lark-paper-library/SKILL.md", SCRIPT]
@@ -649,7 +681,7 @@ class PublicContractTests(unittest.TestCase):
 
     def test_deployment_order_and_direct_faq_input_are_explicit(self):
         text = (ROOT / "DEPLOYMENT.md").read_text(encoding="utf-8")
-        self.assertLess(text.index("Publish the compatible v1.1 MRL SQLite index first"), text.index("publish the v1.1 connector contract and FAQ"))
+        self.assertLess(text.index("Require the compatible v1.1 MRL SQLite index first"), text.index("publish the v1.1.1 connector contract and FAQ"))
         self.assertIn("The reviewed public file [`FAQ.md`](FAQ.md) is the sole FAQ publication input", text)
         self.assertIn("--file FAQ.md", text)
         self.assertNotIn('--file "$REPO_ROOT/FAQ.md"', text)
