@@ -1,152 +1,150 @@
-# Management Research Library — FAQ
+# Management Research Library — FAQ (connector v1.1.0)
 
-Answers for members and their AI agents. Check here before asking the
-maintainer. Coordinates (folder URL, tokens) are intentionally absent — they
-come privately from the maintainer and from `_tracking/CONNECT.md` inside the
-library. A copy of this FAQ also lives in `_tracking/FAQ.md`.
+Coordinates are deliberately absent. The maintainer shares the library folder
+URL privately; `_tracking/CONNECT.md` supplies runtime tokens. Never place
+either in public source, an issue, or a response.
 
-## Access & accounts
+## Access and setup
 
-**Q: I don't use Feishu. Can I still use the library?**
-Register a free Feishu account (feishu.cn app or website) — you never need to
-use Feishu for anything else; the account only carries your access permission.
-Send the maintainer the email/phone you registered with, and you'll be invited.
+**Do I need a Feishu account?**
 
-**Q: Is there a password or public link?**
-No. Access is per-account invitation only. There is no anonymous path, and
-API/agent access never works via passwords — only via your authenticated
-Feishu identity holding view permission.
+Yes. Access is by invitation to an individual account. There is no password or
+anonymous API path. Confirm the identity with `lark-cli whoami --as user`.
 
-**Q: My agent gets `permission denied` / `not exist`.**
-Your account isn't a collaborator yet (or the invite went to a different
-account than the one lark-cli is logged into). Check `lark-cli whoami`, then
-ask the maintainer to invite exactly that account. Agents: report this to your
-user and stop — do not retry in a loop.
+**Which authorization should I use?**
 
-**Q: Can my agent write anything at all?**
-Two things only: append a record to the Download Log after each download
-operation, and append a record to the `feedback` table (same Base). Everything
-else is view-only and enforced server-side by Feishu — a write attempt fails
-with a permission error no matter what the agent does.
+Use only the explicit least-privilege scopes in `SKILL.md`. If a scope is
+rejected or missing, stop and report it. Do not request broad all-domain access.
 
-## Setup
+**What can an agent write?**
 
-**Q: How do I install the CLI?**
-`npx @larksuite/cli@latest install` (needs Node.js; official repo:
-github.com/larksuite/cli). Then `lark-cli config init` and the `auth login`
-command from SKILL.md Step 1. `sqlite3` and `python3` ship with macOS/Linux.
-
-**Q: `auth login` rejects a scope name.**
-Tenant configurations vary. Fall back to `lark-cli auth login --domain all`,
-which grants a broader but still user-bound scope set.
-
-**Q: My agent has native Feishu integration (e.g., Workbuddy). Do I still need lark-cli?**
-Not necessarily — natively integrated agents can browse to `_tracking/CONNECT.md`,
-download the CSV index, and fetch PDFs with their own tools. They should still
-follow the same contract (limits, verification, logging) as closely as their
-toolset allows, and tell you which steps they cannot perform.
+It may append to two Base tables only: `download_log` after verified downloads,
+and `feedback` for library/content/workflow reports. It must not change any
+Drive file, folder, index, or document.
 
 ## Finding papers
 
-**Q: How do I search?**
-Your agent downloads one index file (`mrl-index.sqlite3`, ~3,500+ papers) and
-queries it locally — by title words, first author, co-author, year, journal,
-or DOI. Searching by DOI is the most precise when you have one.
+**How does search work?**
 
-**Q: A paper I expect isn't found. Is it missing or am I searching wrong?**
-Try, in order: (1) DOI, if you have it; (2) `title_norm` keywords — the
-normalized column strips punctuation and accents (search `ozturk`, not
-`Öztürk`; both the index and your query should use the plain form);
-(3) `first_author_norm`. If still nothing, the paper likely isn't in the
-library yet — file a `missing-paper` feedback record (below) so the
-maintainer can ingest it.
+The helper downloads the exact pinned SQLite index token to a private temporary
+file, validates it, and searches it locally by DOI, title, author, year,
+journal, or keyword. It never crawls or searches the paper folders.
 
-**Q: A row has an empty author list. Bug?**
-Usually not — most such rows (~180) are papers whose DOIs Crossref doesn't
-serve yet or that carry no DOI at all (working papers, some editorials). They
-are findable by first author and title, but not by co-author search, until an
-enrichment pass fills them. If the paper is demonstrably published with a
-working DOI, that IS worth a `metadata-error` feedback record.
+**What if the index is unavailable or invalid?**
 
-**Q: A `doi` value looks like `AMJ_20220421`. Can I cite that?**
-Never — values not starting with `10.` are not DOIs. A 2026-07-10 audit found
-such values were mangled journal manuscript numbers whose real DOIs existed
-all along, and repaired every known case against Crossref. If you encounter
-one, don't cite it — file a `metadata-error` feedback record with the
-paper_id so the maintainer can repair it the same way.
+Search and download stop. There is no filename-search fallback. A missing
+table/column, failed SQLite integrity check, duplicate file identity, invalid
+row count, or invalid file identity makes the index unusable.
 
-**Q: The search returned several plausible candidates.**
-Agents must show the candidates (title, authors, year, journal, DOI) and let
-the human choose. Guessing is a contract violation — accuracy beats speed here.
+**What if the index is old?**
 
-**Q: How fresh is the index?**
-Check `index_meta.built_at` (agents do this automatically). The index is
-rebuilt after each ingest batch. If it's older than ~7 days, very recent
-papers may be missing — mention it, don't conclude the paper doesn't exist.
+An index older than seven 24-hour days is not merely a warning: search and
+download fail closed until the maintainer publishes a fresh valid index.
 
-**Q: Is my downloaded PDF the final published version?**
-Check the row's `version_note` column — it holds the file's validation record.
-`publication_version=official_published_issue_pdf` (or an empty note) means
-you have the final published version. A note mentioning "proof",
-"online-first", or "superseded" means the paper is real and correctly
-identified but not yet the Version of Record — page numbers and the year may
-change at final publication. The library replaces such copies with the VOR
-when it appears (library policy).
+**What if several results look plausible?**
 
-## Downloading
+The agent shows title, authors, year, journal, and DOI and asks the user to
+choose. It must never guess. A value not beginning with a valid DOI form must
+not be cited as a DOI.
 
-**Q: Why at most 15 PDFs per operation and 80 per 30 hours?**
-Group policy set by the maintainer: it keeps individual usage reasonable,
-auditable, and fair, and protects the shared library from accidental bulk
-drains. The 30-hour rolling window smooths day-boundary bursts.
+**How do I know whether a PDF is the final published version?**
 
-**Q: How is my usage counted?**
-Every download operation appends a record (who, when, how many) to the shared
-Download Log; the timestamps and identity are server-stamped and cannot be
-faked. Your agent sums your entries in the last 30 hours before downloading.
-Usage is per Feishu account — all your devices and agents share one budget.
+Use the derived `publication_version` field only:
 
-**Q: The downloaded file failed hash verification.**
-The agent deletes it and retries once. If it fails again: the index may be
-mid-update — re-download the index and retry. Persisting mismatches should be
-reported as a `bug` feedback record with the paper_id and file_token.
+- `official_published_issue_pdf`: final issue PDF;
+- `in_press_or_online_pdf`: not the final issue PDF;
+- `unknown`: blank, generic, or insufficient evidence.
 
-**Q: A download produced a 0-byte file.**
-Transient network failure — retry once before concluding anything.
+Only these exact values are meaningful. An empty `version_note` does not prove
+that a file is final.
 
-**Q: Can my agent mirror the whole library for offline use?**
-No. Bulk mirroring (`+pull`/`+sync`) is forbidden — it bypasses the quota and
-duplicates a licensed collection. Download what you need, within limits.
+## Quotas and logging
 
-**Q: Where do downloaded PDFs end up?**
-In the agent's working directory (typically a `papers/` subfolder). Ask your
-agent — and note the library's PDFs are for members' research use; don't
-redistribute them outside the group.
+**What are the limits?**
 
-**Q: Can I add papers to the library?**
-Not directly (the folder is read-only for members). Send PDFs to the
-maintainer, or file a `missing-paper` feedback record with the DOI/reference —
-papers enter through the maintainer's ingest pipeline so metadata stays verified.
+At most 15 PDFs per operation and 80 PDFs per rolling 30 hours per Feishu user.
 
-## Questions, problems, suggestions
+**Where does usage come from?**
 
-**Q: Where do I report problems or ideas?**
-Two channels, routed by topic:
-- **Library content & workflow** (missing paper, wrong metadata, quota issues,
-  feature ideas, anything about the Feishu side): append a record to the
-  **`feedback` table** in the same Base as the Download Log (coordinates in
-  CONNECT.md). Set `type` (bug / missing-paper / metadata-error /
-  feature-request / question / other), `title`, `detail`, `paper_ref` if
-  relevant, `agent`, and `status` = `new`. The maintainer triages `status`
-  and writes `resolution` — check your record later for the answer.
-- **Connector code & docs** (this repo — skill errors, unclear instructions):
-  open a GitHub Issue on the repo.
+Only the shared Download Log Base. The helper reads all matching pages and
+parses the Asia/Shanghai timestamps. A local cache or ledger is never used as a
+quota substitute.
 
-Agents: before filing a `question`, check this FAQ and CONNECT.md — and after
-filing, tell your user what you filed so they can follow up.
+**What if the Base cannot be checked?**
 
-**Q: Is the feedback table like a pull request?**
-Closer to an issue tracker. For actual changes to the connector's code or
-docs, a GitHub pull request on the repo is welcome too — but reports and
-suggestions belong in the feedback table (library topics) or GitHub Issues
-(connector topics).
+No PDF is downloaded. Partial results, malformed fields, failed pagination, bad
+timestamps, and permission errors all cause a controlled refusal.
+
+**Why does the agent need an identifier?**
+
+The Download Log records which actual product/agent performed the operation.
+The caller must supply that identifier; placeholders such as `agent` or
+`unknown` are rejected. The stored value also carries a unique operation ID so
+an uncertain append can be matched to its own record.
+
+**Can two devices download at the same time?**
+
+No. The helper locks concurrent operations that share one local state
+directory, but the Base has no atomic cross-device quota reservation. To keep
+the 80-paper limit reliable, serialize downloads for the same Feishu account.
+
+**What is the pending-download-log journal?**
+
+Before a remote PDF transfer, the helper creates a private durable journal. It
+updates the journal as bytes are verified. If Base append/readback is uncertain,
+the journal remains and every later download is blocked. Run `reconcile-log`
+with the same Feishu user and actual agent identifier. Do not edit or delete the
+journal manually and do not redownload already verified PDFs.
+
+## Download safety
+
+**Can the connector replace a local file?**
+
+No. All output names are preflighted. If any target exists, the whole operation
+stops before network access. Each new PDF is downloaded into a private temporary
+directory, checked for file size, SHA-256, PDF header, and EOF, then installed
+with an atomic no-clobber operation.
+
+**What happens to a mismatched download?**
+
+The invalid temporary file is discarded; no target PDF is installed. The agent
+reports the failed name. It never deletes or modifies a pre-existing PDF.
+
+**Can an agent mirror the library?**
+
+No. Whole-folder pull/sync and concurrent bulk download bypass the quota and
+are prohibited. Downloads are sequential and limited to the selected index
+rows.
+
+## Troubleshooting
+
+**`permission denied` / `not exist`** — Confirm the authenticated Feishu user
+was invited and has Base append permission. Stop; do not loop retries.
+
+**Index download fails** — Report the pinned-token failure. Do not locate an
+index by name or use Drive paper search.
+
+**Index is stale** — Ask the maintainer for an explicit MRL refresh. Do not
+bypass the seven-day policy.
+
+**Why might v1.1 refuse an older index?** — v1.1 requires the conservative
+derived `publication_version` field. Maintainers publish and verify the
+compatible index before deploying the v1.1 connector and FAQ; see
+`DEPLOYMENT.md` in the public repository.
+
+**Quota query fails** — Stop. There is no offline fallback.
+
+**Pending log blocks downloads** — Run the documented `reconcile-log` command
+with the same agent identifier and Feishu user. If reconciliation remains
+ambiguous, contact the maintainer.
+
+**`confirmation_required`** — A forbidden write was attempted. Stop and do not
+add `--yes`.
+
+## Feedback
+
+Read this FAQ and private CONNECT contract first. Library content/workflow
+issues may be appended to the `feedback` Base table using the actual agent
+identifier and `status=new`. Connector source/documentation issues belong in a
+GitHub Issue. Tell the user what was filed, and never include private library
+coordinates or credentials.

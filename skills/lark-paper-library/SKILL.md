@@ -1,7 +1,7 @@
 ---
 name: lark-paper-library
-version: 1.0.1
-description: "Search and download academic paper PDFs from the Management Research Library — a shared, read-only Feishu (Lark) Drive folder indexed by a verified SQLite catalog. Use when the user asks to find, locate, list, or download papers from the shared library by title, author, year, journal, DOI, or keyword. Strictly read-only: never modifies the library."
+version: 1.1.0
+description: "Search and download academic PDFs from the Management Research Library through a validated SQLite catalog, authoritative quotas, and hash-verified no-clobber installation."
 metadata:
   requires:
     bins: ["lark-cli", "sqlite3", "python3"]
@@ -9,250 +9,208 @@ metadata:
 
 # Management Research Library — Agent Connector
 
-Read-only access to a shared library of academic paper PDFs hosted on Feishu (Lark).
-Works with any agent that can run shell commands: Claude Code, Codex, OpenClaw, Workbuddy, etc.
+Read-only access to a shared Feishu (Lark) library of academic PDFs. The
+maintainer shares the library folder URL privately. This public repository
+contains no library coordinates, file tokens, Base tokens, or tenant URLs.
 
-**This public file contains no library coordinates.** Your user receives the
-library folder URL privately from the maintainer; Step 2 turns that URL into
-everything else. Values written `{{LIKE_THIS}}` are filled in
-`_tracking/CONNECT.md` inside the library — the operational copy of this
-contract. Never commit the folder URL, tokens, or CONNECT.md to any public place.
+The tested helper at `scripts/mrl_connector.py` is the operational boundary.
+Use it for index retrieval, search, quota checks, PDF downloads, and pending-log
+reconciliation. Do not replace its checks with ad hoc shell commands.
 
-## Step 0 — Install lark-cli (one-time)
-
-lark-cli is Feishu's official CLI (https://github.com/larksuite/cli):
+## Step 0 — Install prerequisites
 
 ```bash
-npx @larksuite/cli@latest install     # official installer (needs Node.js)
-lark-cli --version                    # verify (developed against 1.0.64)
+npx @larksuite/cli@latest install
+lark-cli --version
+python3 --version
+sqlite3 --version
 ```
 
-`sqlite3` and `python3` ship with macOS/Linux. Optional, for Claude Code/Codex
-users: `npx skills add larksuite/cli -y -g` installs the full Lark skill set.
-
-## Step 1 — Authenticate as yourself (one-time)
+## Step 1 — Authenticate as the user
 
 ```bash
-lark-cli config init          # guided app configuration (browser/QR flow)
-lark-cli auth login --scope "drive:drive.metadata:readonly drive:file:download base:record:read base:record:create search:docs:read"
-# broader fallback if a scope name is rejected on your tenant: lark-cli auth login --domain all
-lark-cli whoami               # confirm identity = user, status ready
+lark-cli config init
+lark-cli auth login --scope "drive:drive.metadata:readonly drive:file:download base:record:read base:record:create"
+lark-cli whoami --as user
 ```
 
-Your Feishu account must already be a collaborator (viewer) of the library
-folder — the maintainer invites you; there is no password or anonymous path
-for API access. If a command returns `permission denied`, ask the maintainer
-to (re)invite your account, or apply:
+Use only the listed least-privilege scopes. If a scope is rejected, stop and
+report the exact missing scope to the user or maintainer. Do not request an
+all-domain authorization.
+
+The authenticated account must already be a library viewer and have append
+permission on the Download Log Base. Agents never add members.
+
+## Step 2 — Bootstrap the private coordinates
+
+The user supplies the library folder URL privately. Use the helper to resolve
+`_tracking/CONNECT.md` by exact name and type across every Drive page and
+download it through a private temporary file:
 
 ```bash
-lark-cli drive +apply-permission --token <FOLDER_TOKEN from Step 2> --type folder
+HELPER="skills/lark-paper-library/scripts/mrl_connector.py"
+python3 "$HELPER" bootstrap \
+  --folder-url "<private library folder URL>" \
+  --output "$HOME/.mrl/CONNECT.md"
 ```
 
-## Step 2 — Bootstrap from the privately shared folder URL (once per setup)
+Read the resulting private file. It supplies the pinned SQLite index token and
+Download Log Base token. Do not print its contents.
+
+This bootstrap listing is only for locating the private contract. It is never
+a paper-search fallback. Never copy the folder URL, CONNECT contents, or any
+token into a public file, issue, log, or response.
+
+If a pinned index token fails, stop and report it. Never resolve an index by
+name, crawl paper folders, or search Drive as a substitute.
+
+## Hard rules
+
+1. **Library read-only.** Never upload, overwrite, move, rename, or delete a
+   library or `_tracking` file. The only permitted writes are appends to the
+   `download_log` and `feedback` tables.
+2. **Index only.** Search only a locally downloaded SQLite index that passes
+   integrity, schema, uniqueness, row-count, and seven-day freshness checks.
+   Missing, invalid, incompatible, or older-than-seven-days means stop.
+3. **No identity guessing.** For zero or multiple plausible results, show the
+   candidates (title, authors, year, journal, DOI) and let the user choose.
+4. **At most 15 PDFs per operation** and **80 PDFs in a rolling 30 hours** per
+   Feishu user. The fully paginated shared Download Log is authoritative.
+   If it cannot be checked, no PDF may be downloaded. There is no local quota
+   fallback.
+5. **Sequential, verified downloads.** Download through private temporary files
+   and validate byte size, SHA-256, PDF header, and EOF before installation.
+6. **No clobber.** Never overwrite or delete a pre-existing local PDF. If any
+   selected output path exists, stop before downloading anything.
+7. **Durable logging.** State is journaled before downloads. An unconfirmed
+   Download Log append blocks every later download until `reconcile-log`
+   confirms or completes the exact pending record.
+8. **Actual agent identity.** Supply the real product/agent identifier used for
+   the operation. The helper preserves it and adds a unique operation ID for
+   unambiguous log readback. Never log `agent`, `unknown`, or a hard-coded
+   product that is not performing the work.
+9. Download sequentially, back off on rate limits, never mirror the library,
+   never pass `--yes`, and treat `confirmation_required` as a contract breach.
+10. Do not run downloads for the same Feishu account concurrently on different
+    devices. A local lock serializes agents sharing one state directory; the
+    Base does not provide an atomic cross-device quota reservation.
+
+## Step 3 — Fetch and validate the index once per session
+
+Set the helper path to the copy installed with this skill:
 
 ```bash
-FOLDER_URL="<paste the URL the maintainer shared privately>"
-FOLDER_TOKEN="${FOLDER_URL##*/drive/folder/}"; FOLDER_TOKEN="${FOLDER_TOKEN%%\?*}"
-
-# find _tracking and CONNECT.md — folder listings are PAGINATED (<=200/page);
-# always walk every page or you will silently miss files
-CONNECT_TOKEN=$(python3 - "$FOLDER_TOKEN" <<'EOF'
-import json, subprocess, sys
-def walk(folder_token, want_name, want_type):
-    page = ""
-    while True:
-        params = {"folder_token": folder_token, "page_size": 200}
-        if page: params["page_token"] = page
-        p = subprocess.run(["lark-cli","drive","files","list","--params",json.dumps(params),
-                            "--format","json","--as","user"], capture_output=True, text=True)
-        d = json.loads(p.stdout)["data"]
-        for f in d.get("files", []):
-            if f["name"] == want_name and f["type"] == want_type:
-                return f["token"]
-        if not d.get("has_more"): return None
-        page = d.get("next_page_token", "")
-        if not page: return None
-tracking = walk(sys.argv[1], "_tracking", "folder")
-print(walk(tracking, "CONNECT.md", "file") or "")
-EOF
-)
-mkdir -p mrl
-lark-cli drive +download --file-token "$CONNECT_TOKEN" --output mrl/CONNECT.md --overwrite --as user
+HELPER="skills/lark-paper-library/scripts/mrl_connector.py"
+python3 "$HELPER" fetch-index \
+  --file-token "{{INDEX_SQLITE_TOKEN}}" \
+  --output "$HOME/.mrl/mrl-index.sqlite3"
 ```
 
-**Read `mrl/CONNECT.md` and follow it.** It is this contract with every
-`{{...}}` value filled (index tokens, Download Log Base, tenant domain).
+The helper downloads by the exact pinned token into a private temporary file,
+validates it, and only then atomically replaces the local index. It refuses an
+index that is older than seven days. Do not continue on exit code `2`.
 
-## Hard rules (non-negotiable)
-
-1. **Read-only.** Never upload to, modify, rename, move, or delete anything under the library folder or `_tracking`. Do not call `drive +upload`, `+move`, `+delete`, `+push`, `+sync`, `files patch`, or any Base write command against library resources. Sole exceptions: appending records to the Download Log Base — its `download_log` table (usage logging) and `feedback` table (reports/suggestions).
-2. **≤ 15 PDFs per download operation.** For larger requests, download at most 15, tell the user the cap, and continue only when they ask.
-3. **≤ 80 PDFs per rolling 30-hour window per user.** Check the ledger before every operation (Step 5). If the request exceeds the remainder, download only up to it and say when quota frees.
-4. **Verify every download** against the index `sha256` and `file_size`. A mismatched file must be deleted and reported — never silently kept.
-5. **Download sequentially**, never in parallel floods; back off on rate-limit errors.
-6. **Never mirror the library.** `drive +pull` / `+sync` on library folders is forbidden.
-7. **Never pass `--yes`** to any lark-cli command touching library resources. `confirmation_required` (exit 10) means you attempted a write — stop.
-8. **Never guess a paper's identity.** Zero or multiple plausible matches → show the user the candidates (title, authors, year, journal, DOI) and let them choose.
-
-## Step 3 — Get the index (once per session)
+You may revalidate without network access:
 
 ```bash
-lark-cli drive +download --file-token {{INDEX_SQLITE_TOKEN}} --output mrl/mrl-index.sqlite3 --overwrite --as user
-# CSV twin for environments without sqlite3: {{INDEX_CSV_TOKEN}} -> mrl-index.csv
-# if a pinned token ever 404s, resolve by name in _tracking exactly as in Step 2
-sqlite3 mrl/mrl-index.sqlite3 "SELECT key||': '||value FROM index_meta WHERE key IN ('built_at','rows');"
-# if built_at is older than ~7 days, tell the user very recent papers may be missing
+python3 "$HELPER" validate-index --index "$HOME/.mrl/mrl-index.sqlite3"
 ```
 
-## Step 4 — Search by metadata (local, exact, zero API quota)
+## Step 4 — Search the validated index
 
-Table `mrl_index`, one row per verified PDF. Match on the pre-normalized
-columns (`title_norm`, `first_author_norm`); show the user the original
-`title`/`authors`. `authors` holds the full Crossref-verified author list
-where available; `first_author_last` is always populated. Data semantics:
-a `doi` value not starting with `10.` is an internal manuscript ID (e.g.
-`AMJ_20220421` for an in-press paper) — never cite it as a DOI; rows
-with empty `authors` (in-press items) are only findable via
-`first_author_norm`, not co-author search; and `version_note` carries the
-file's validation record: `publication_version=official_published_issue_pdf`
-(or an empty note) means you have the final published version; any mention of
-"proof", "online-first", or "superseded" means the copy is real and correctly
-identified but NOT the Version of Record — tell the user before they cite
-page numbers or the year from such a copy.
+Search by one or more metadata fields. Search returns `file_id`, which is the
+only selector accepted by the download command.
 
 ```bash
-sqlite3 -json mrl/mrl-index.sqlite3 \
-  "SELECT paper_id,title,authors,year,journal,doi,file_name,file_size,sha256,file_token
-   FROM mrl_index WHERE first_author_norm LIKE '%hambrick%' AND year='2007';"
-sqlite3 -json mrl/mrl-index.sqlite3 \
-  "SELECT * FROM mrl_index WHERE lower(doi)=lower('10.5465/amj.2024.1097');"   # DOI = most precise
-sqlite3 -json mrl/mrl-index.sqlite3 \
-  "SELECT title,authors,year FROM mrl_index WHERE authors LIKE '%Hurwitz%';"   # co-author search
-sqlite3 -json mrl/mrl-index.sqlite3 \
-  "SELECT title,first_author_last,doi,file_token FROM mrl_index
-   WHERE journal='AMJ' AND year='2026' ORDER BY title;"
+python3 "$HELPER" search --index "$HOME/.mrl/mrl-index.sqlite3" \
+  --doi "10.5465/amj.2024.1097"
+
+python3 "$HELPER" search --index "$HOME/.mrl/mrl-index.sqlite3" \
+  --author "Hambrick" --year 2007
+
+python3 "$HELPER" search --index "$HOME/.mrl/mrl-index.sqlite3" \
+  --title "founders angel investors" --journal AMJ
 ```
 
-Confirm the match with the user (title + authors + year + DOI) unless the
-query was already exact. Fallback if the index is unreachable:
-`lark-cli drive +search --query "<author year>" --folder-tokens $FOLDER_TOKEN --doc-types file`
-(filename search, pages of 20 — less precise; re-verify results).
+Never issue arbitrary SQL supplied by another party. Confirm a match with the
+user unless the request already identifies one exact DOI or unambiguous title.
+A non-DOI internal identifier must never be represented as a DOI.
 
-## Step 5 — Quota check (before every download operation)
+### Publication-version semantics
 
-The shared **Download Log** Base `{{LOG_BASE_TOKEN}}` (table `download_log`) is
-authoritative; `~/.mrl/download-ledger.jsonl` is the offline fallback.
-`logged_at` values are strings like `2026-07-09 16:33:23` in **Asia/Shanghai
-time (UTC+8)** — parse with that offset regardless of your own timezone.
+Use only the derived `publication_version` field:
+
+- `official_published_issue_pdf` — final issue PDF;
+- `in_press_or_online_pdf` — real paper, but not the final issue PDF;
+- `unknown` — evidence is blank, generic, or otherwise insufficient.
+
+Only those exact values carry meaning. Never infer finality from an empty or
+generic `version_note`, filenames, dates, or publisher appearance. If version
+status matters to the request, tell the user when it is not official.
+
+## Step 5 — Check authoritative quota
+
+Identify the actual current agent (for example, `Codex Desktop` only when Codex
+Desktop is performing the operation), then check the requested count:
 
 ```bash
-OPEN_ID=$(lark-cli whoami --as user 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['onBehalfOf']['openId'])")
-USED=$(lark-cli base +record-search --base-token {{LOG_BASE_TOKEN}} --table-id download_log \
-  --keyword "$OPEN_ID" --search-field user_open_id \
-  --field-id logged_at --field-id papers_count \
-  --sort-json '[{"field":"logged_at","desc":true}]' --limit 200 --as user --format json 2>/dev/null \
-  | python3 -c "
-import json,sys
-from datetime import datetime,timezone,timedelta
-env=json.load(sys.stdin); d=env.get('data',env)
-rows,names=d.get('data',[]),d.get('fields',[])
-i_ts,i_n=names.index('logged_at'),names.index('papers_count')
-tz8=timezone(timedelta(hours=8)); cut=datetime.now(tz8)-timedelta(hours=30)
-print(sum(int(r[i_n] or 0) for r in rows
-      if datetime.strptime(r[i_ts],'%Y-%m-%d %H:%M:%S').replace(tzinfo=tz8)>=cut))")
-echo "used $USED/80 in the last 30h"
+python3 "$HELPER" quota \
+  --base-token "{{LOG_BASE_TOKEN}}" \
+  --requested 3
 ```
 
-If `USED + N > 80`: trim N to the remainder (or stop at 0) and tell the user
-when the oldest in-window entry expires. If the log Base is unreachable, apply
-the same computation to the local ledger — never skip the check. Do not edit
-or delete existing log rows (`logged_by` and record history are server-side).
+The helper queries every matching Base page and parses Asia/Shanghai log
+timestamps into a rolling 30-hour window. If Base access, pagination, fields,
+timestamps, or counts cannot be validated, it refuses. Do not estimate usage
+and do not use a local ledger.
 
-## Step 6 — Download and verify (≤15 per operation)
+## Step 6 — Download selected PDFs
+
+Pass 1–15 unique `file_id` values returned by Step 4. Downloads are sequential.
 
 ```bash
-# rows.json = selected rows from Step 4 (max 15)
-python3 - <<'EOF'
-import json, subprocess, hashlib, os, sys
-rows = json.load(open("rows.json"))
-assert len(rows) <= 15, "batch cap is 15 PDFs per operation"
-os.makedirs("papers", exist_ok=True)
-ok, failed = [], []
-for r in rows:
-    out = os.path.join("papers", r["file_name"])
-    p = subprocess.run(["lark-cli","drive","+download","--file-token",r["file_token"],
-                        "--output",out,"--overwrite","--as","user"], capture_output=True, text=True)
-    good = False
-    if p.returncode == 0 and os.path.exists(out):
-        sha = hashlib.sha256(open(out,"rb").read()).hexdigest()
-        good = (sha == r["sha256"] and os.path.getsize(out) == int(r["file_size"]))
-        if not good:
-            os.remove(out)            # never keep an unverified file
-    (ok if good else failed).append(r["file_name"])
-print(f"verified {len(ok)}/{len(rows)}")
-for f in failed: print("FAILED:", f)
-sys.exit(1 if failed else 0)
-EOF
+python3 "$HELPER" download \
+  --index "$HOME/.mrl/mrl-index.sqlite3" \
+  --file-id 123 --file-id 456 \
+  --output-dir papers \
+  --base-token "{{LOG_BASE_TOKEN}}" \
+  --agent "<actual agent identifier>"
 ```
 
-Afterwards, using **real** numbers from the verification output:
+The helper revalidates index freshness, refuses any pre-existing target,
+rechecks the authoritative quota, downloads to a private temporary directory,
+validates bytes, installs with an atomic no-clobber link, and appends the real
+verified count to Base. Report requested, verified, and failed counts from the
+helper output rather than inferred counts.
+
+If the Base append or readback is uncertain, the helper exits `2` and retains a
+private `~/.mrl/pending-download-log.json`. The installed, verified PDFs remain;
+do not redownload them. Reconcile the exact pending record before any later
+download:
 
 ```bash
-# 1) append to the shared Download Log (papers_count = verified count)
-USER_NAME=$(lark-cli whoami --as user 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['onBehalfOf']['userName'])")
-lark-cli base +record-batch-create --base-token {{LOG_BASE_TOKEN}} --table-id download_log \
-  --json "{\"fields\":[\"user_open_id\",\"user_name\",\"agent\",\"papers_count\",\"paper_ids\"],
-           \"rows\":[[\"$OPEN_ID\",\"$USER_NAME\",\"claude-code\",N_VERIFIED,\"p123;p456\"]]}" --as user
-# 2) mirror into the local ledger
-python3 -c "
-import json,os
-from datetime import datetime,timezone
-p=os.path.expanduser('~/.mrl/download-ledger.jsonl'); os.makedirs(os.path.dirname(p),exist_ok=True)
-open(p,'a').write(json.dumps({'ts':datetime.now(timezone.utc).isoformat(timespec='seconds'),'count':N_VERIFIED,'paper_ids':'p123;p456'})+'\n')"
-# 3) report requested / downloaded / verified counts and any FAILED names to the user
+python3 "$HELPER" reconcile-log \
+  --base-token "{{LOG_BASE_TOKEN}}" \
+  --agent "<same actual agent identifier>"
 ```
 
-If the shared-log append fails, retry once; if it still fails, stop further
-download operations this session and tell the user (no log = no more downloads).
+Do not remove or edit the pending journal manually. A different agent or Feishu
+user cannot reconcile it.
 
-## Permissions
+## Feedback
 
-| Operation | Scope | Library permission |
-|---|---|---|
-| Download index & PDFs | `drive:file:download` | folder viewer |
-| Resolve tokens / metadata | `drive:drive.metadata:readonly` | folder viewer |
-| Filename search fallback | `search:docs:read` | folder viewer |
-| Download Log read/append | `base:record:read` + `base:record:create` | edit on the Log Base only |
+Read `FAQ.md` first. Library/content/workflow problems may be appended to the
+`feedback` table using the private Base token. Supply the actual agent identity,
+set `status` to `new`, and tell the user what was filed. Connector source or
+documentation problems belong in a GitHub issue.
 
-## Questions & feedback
+Permitted feedback types are `bug`, `missing-paper`, `metadata-error`,
+`feature-request`, `question`, and `other`. Feedback must not expose private
+folder URLs, tokens, credentials, or unrelated user data.
 
-Check `FAQ.md` (repo root; mirrored at `_tracking/FAQ.md`) before asking the
-maintainer — most setup, search, quota, and error questions are answered there.
+## Controlled refusals
 
-**Library / content / workflow issues** (missing paper, metadata error, quota
-problem, feature idea): append a record to the **`feedback` table** — it lives
-in the same Base as the Download Log, and is the second and last permitted write:
-
-```bash
-lark-cli base +record-batch-create --base-token {{LOG_BASE_TOKEN}} --table-id feedback \
-  --json '{"fields":["type","title","detail","paper_ref","agent","status"],
-           "rows":[["missing-paper","<short title>","<what happened / what you propose, incl. exact errors>","<DOI or paper_id, or empty>","<your product name>","new"]]}' --as user
-```
-
-`type` is one of: `bug`, `missing-paper`, `metadata-error`, `feature-request`,
-`question`, `other`. The maintainer triages `status` and writes `resolution` —
-re-query your record later for the answer. **Connector code/docs issues**
-(this skill, the repo): open a GitHub Issue on the repo instead. After filing
-anything, tell your user what you filed.
-
-## Troubleshooting
-
-| Symptom | Action |
-|---|---|
-| `permission denied` / `not exist` | Your account is not a library member → `+apply-permission` (Step 1) or contact the maintainer; do not retry in a loop |
-| Error lists `permission_violations` + `hint` | Missing OAuth scope → run the suggested `lark-cli auth login --scope "..."` |
-| sha256 mismatch after download | Delete the file, retry once; if persistent, re-download the index (it may be mid-update), then report to the maintainer with paper_id and file_token |
-| Downloaded file is 0 bytes / index won't open in sqlite3 | Transient download failure — retry the download once before concluding anything |
-| Rate limit | Wait, resume sequentially |
-| `confirmation_required` (exit 10) | You attempted a write — forbidden; stop, never add `--yes` |
-| `unsafe file path` | Use a relative `--output` path |
+The helper returns exit code `2` without a traceback for policy or validation
+refusals, including stale/invalid indexes, unavailable quota, exhausted quota,
+unsafe paths, existing outputs, invalid selection, and unresolved audit logs.
+Stop and report the refusal; do not weaken or bypass it.
