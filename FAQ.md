@@ -1,4 +1,4 @@
-# Management Research Library — FAQ (connector v1.1.1)
+# Management Research Library — FAQ (connector v1.1.2)
 
 Coordinates are deliberately absent. The maintainer shares the library folder
 URL privately; `_tracking/CONNECT.md` supplies runtime tokens. Never place
@@ -75,9 +75,11 @@ At most 15 PDFs per operation and 80 PDFs per rolling 30 hours per Feishu user.
 
 **Where does usage come from?**
 
-Only the shared Download Log Base. The helper reads all matching pages and
-parses the Asia/Shanghai timestamps. A local cache or ledger is never used as a
-quota substitute.
+Only the shared Download Log Base. The helper reads all matching pages. It
+accepts the historical Asia/Shanghai timestamp form and timezone-explicit
+ISO-8601 values, normalizing both before quota arithmetic. Missing, numeric,
+malformed, timezone-ambiguous, or implausibly future values are refused. A
+local cache or ledger is never used as a quota substitute.
 
 **What if the Base cannot be checked?**
 
@@ -136,7 +138,7 @@ index by name or use Drive paper search.
 **Index is stale** — Ask the maintainer for an explicit MRL refresh. Do not
 bypass the seven-day policy.
 
-**Why might v1.1.1 refuse an older index?** — v1.1 requires the conservative
+**Why might v1.1.2 refuse an older index?** — v1.1 requires the conservative
 derived `publication_version` field. Maintainers publish and verify the
 compatible index before deploying the v1.1 connector and FAQ; see
 `DEPLOYMENT.md` in the public repository.

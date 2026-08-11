@@ -28,7 +28,7 @@ from typing import Any, Callable, Iterable, Sequence
 from urllib.parse import quote, urlsplit
 
 
-VERSION = "1.1.1"
+VERSION = "1.1.2"
 EXIT_REFUSED = 2
 MAX_OPERATION = 15
 MAX_ROLLING = 80
@@ -165,7 +165,7 @@ def validate_index(path: Path, *, now: datetime | None = None) -> dict[str, Any]
             columns = {row[1] for row in db.execute("PRAGMA table_info(mrl_index)")}
             missing = REQUIRED_COLUMNS - columns
             if missing:
-                raise ConnectorError("index schema is incompatible with connector v1.1.1")
+                raise ConnectorError("index schema is incompatible with connector v1.1.2")
             meta = dict(db.execute("SELECT key,value FROM index_meta"))
             built_at = _parse_time(meta.get("built_at", ""))
             age = current - built_at
@@ -568,9 +568,22 @@ def download_log_rows(base_token: str, open_id: str, *, runner: Runner = subproc
 
 
 def _log_time(value: Any) -> datetime:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ConnectorError("Download Log contains an invalid timestamp")
     try:
-        return datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ8)
-    except ValueError as exc:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", value):
+            return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=TZ8)
+        if not re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})",
+            value,
+        ) or value.endswith("-00:00"):
+            raise ValueError("timestamp is not an allowed timezone-explicit form")
+        normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("timestamp lacks an explicit timezone")
+        return parsed.astimezone(TZ8)
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ConnectorError("Download Log contains an invalid timestamp") from exc
 
 

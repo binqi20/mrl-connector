@@ -1,6 +1,6 @@
 ---
 name: lark-paper-library
-version: 1.1.1
+version: 1.1.2
 description: "Search and download academic PDFs from the Management Research Library through a validated SQLite catalog, authoritative quotas, and hash-verified no-clobber installation."
 metadata:
   requires:
@@ -77,7 +77,9 @@ name, crawl paper folders, or search Drive as a substitute.
 4. **At most 15 PDFs per operation** and **80 PDFs in a rolling 30 hours** per
    Feishu user. The fully paginated shared Download Log is authoritative.
    If it cannot be checked, no PDF may be downloaded. There is no local quota
-   fallback.
+   fallback. Server timestamps are accepted only as the historical
+   Asia/Shanghai form or timezone-explicit ISO-8601; missing, numeric,
+   malformed, timezone-ambiguous, or implausibly future values fail closed.
 5. **Sequential, verified downloads.** Download through private temporary files
    and validate byte size, SHA-256, PDF header, and EOF before installation.
 6. **No clobber.** Never overwrite or delete a pre-existing local PDF. If any

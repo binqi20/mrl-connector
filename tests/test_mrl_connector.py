@@ -449,8 +449,43 @@ class QuotaTests(unittest.TestCase):
         used, _ = mrl.quota_usage(rows, now=NOW.astimezone(mrl.TZ8))
         self.assertEqual(used, 7)
 
+    def test_timezone_explicit_iso_timestamps_are_counted(self):
+        rows = [
+            {"papers_count": 7, "logged_at": "2026-08-03T11:00:00.123+08:00"},
+            {"papers_count": 5, "logged_at": "2026-08-03T03:30:00Z"},
+        ]
+        try:
+            used, _ = mrl.quota_usage(rows, now=NOW.astimezone(mrl.TZ8))
+        except mrl.ConnectorError as error:
+            self.fail(f"valid timezone-explicit timestamps were refused: {error}")
+        self.assertEqual(used, 12)
+
+    def test_timezone_ambiguous_or_non_string_timestamps_fail_closed(self):
+        invalid_values = [
+            None,
+            1786455000000,
+            "2026-08-03T11:00:00",
+            " 2026-08-03T11:00:00+08:00",
+            "2026-08-03X11:00:00+08:00",
+            "2026-08-03\x0011:00:00+08:00",
+            "2026-08-03T11:00:00-00:00",
+            "not-a-time",
+        ]
+        for value in invalid_values:
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(mrl.ConnectorError, "invalid timestamp"):
+                    mrl.quota_usage(
+                        [{"papers_count": 1, "logged_at": value}],
+                        now=NOW.astimezone(mrl.TZ8),
+                    )
+
     def test_future_timestamp_fails_closed(self):
         rows = [{"papers_count": 1, "logged_at": "2026-08-03 12:05:01"}]
+        with self.assertRaisesRegex(mrl.ConnectorError, "future timestamp"):
+            mrl.quota_usage(rows, now=NOW.astimezone(mrl.TZ8))
+
+    def test_timezone_explicit_iso_future_timestamp_fails_closed(self):
+        rows = [{"papers_count": 1, "logged_at": "2026-08-03T12:05:01.000+08:00"}]
         with self.assertRaisesRegex(mrl.ConnectorError, "future timestamp"):
             mrl.quota_usage(rows, now=NOW.astimezone(mrl.TZ8))
 
@@ -669,8 +704,8 @@ class PublicContractTests(unittest.TestCase):
     def test_frontmatter_version_is_exact(self):
         text = (ROOT / "skills/lark-paper-library/SKILL.md").read_text(encoding="utf-8")
         frontmatter = text.split("---", 2)[1]
-        self.assertIn("\nversion: 1.1.1\n", "\n" + frontmatter)
-        self.assertEqual(mrl.VERSION, "1.1.1")
+        self.assertIn("\nversion: 1.1.2\n", "\n" + frontmatter)
+        self.assertEqual(mrl.VERSION, "1.1.2")
 
     def test_public_tree_has_no_forbidden_fallbacks(self):
         files = [ROOT / "AGENTS.md", ROOT / "README.md", ROOT / "FAQ.md", ROOT / "DEPLOYMENT.md", ROOT / "skills/lark-paper-library/SKILL.md", SCRIPT]
@@ -681,7 +716,13 @@ class PublicContractTests(unittest.TestCase):
 
     def test_deployment_order_and_direct_faq_input_are_explicit(self):
         text = (ROOT / "DEPLOYMENT.md").read_text(encoding="utf-8")
-        self.assertLess(text.index("Require the compatible v1.1 MRL SQLite index first"), text.index("publish the v1.1.1 connector contract and FAQ"))
+        release_step = "publish the v1.1.2 connector contract and FAQ"
+        self.assertIn(release_step, text)
+        if release_step in text:
+            self.assertLess(
+                text.index("Require the compatible v1.1 MRL SQLite index first"),
+                text.index(release_step),
+            )
         self.assertIn("The reviewed public file [`FAQ.md`](FAQ.md) is the sole FAQ publication input", text)
         self.assertIn("--file FAQ.md", text)
         self.assertNotIn('--file "$REPO_ROOT/FAQ.md"', text)
