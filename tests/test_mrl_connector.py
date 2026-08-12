@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -417,6 +418,212 @@ class BootstrapTests(unittest.TestCase):
                 mrl.bootstrap("https://private.invalid/drive/folder/rootfolder123", state / "CONNECT.md", runner=runner)
             self.assertEqual(downloaded, [])
 
+    def test_bootstrap_reports_sanitized_structured_missing_scope(self):
+        envelope = {
+            "ok": False,
+            "identity": "user",
+            "error": {
+                "type": "authorization",
+                "subtype": "missing_scope",
+                "code": 99991679,
+                "missing_scopes": ["docs:permission.member:auth"],
+                "message": "SECRET",
+                "hint": "https://tenant.invalid/?token=SECRET",
+            },
+        }
+        for channel in ("stdout", "stderr"):
+            with self.subTest(channel=channel), tempfile.TemporaryDirectory() as directory:
+                state = Path(directory) / "state"
+                state.mkdir(mode=0o700)
+                output = state / "CONNECT.md"
+
+                def runner(args, **kwargs):
+                    if args[1:4] == ["drive", "files", "list"]:
+                        params = json.loads(args[args.index("--params") + 1])
+                        files = (
+                            [{"name": "_tracking", "type": "folder", "token": "tracking-runtime-token"}]
+                            if params["folder_token"] == "rootfolder123"
+                            else [{"name": "CONNECT.md", "type": "file", "token": "connect-runtime-token"}]
+                        )
+                        return completed(
+                            args,
+                            payload={"ok": True, "data": {"files": files, "has_more": False}},
+                        )
+                    payload = json.dumps(envelope)
+                    return subprocess.CompletedProcess(
+                        args, 3,
+                        payload if channel == "stdout" else "",
+                        payload if channel == "stderr" else "",
+                    )
+
+                with self.assertRaises(mrl.ConnectorError) as caught:
+                    mrl.bootstrap(
+                        "https://private.invalid/drive/folder/rootfolder123",
+                        output,
+                        runner=runner,
+                    )
+                message = str(caught.exception)
+                for expected in (
+                    "authorization", "missing_scope", "99991679",
+                    "docs:permission.member:auth",
+                ):
+                    self.assertIn(expected, message)
+                for forbidden in ("SECRET", "tenant.invalid", "token=", "identity"):
+                    self.assertNotIn(forbidden, message)
+                self.assertFalse(output.exists())
+                self.assertEqual(list(state.glob(".connect-*")), [])
+
+    def test_bootstrap_unrecognized_cli_failure_remains_generic(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state"
+            state.mkdir(mode=0o700)
+
+            def runner(args, **kwargs):
+                if args[1:4] == ["drive", "files", "list"]:
+                    params = json.loads(args[args.index("--params") + 1])
+                    files = (
+                        [{"name": "_tracking", "type": "folder", "token": "tracking-runtime-token"}]
+                        if params["folder_token"] == "rootfolder123"
+                        else [{"name": "CONNECT.md", "type": "file", "token": "connect-runtime-token"}]
+                    )
+                    return completed(
+                        args,
+                        payload={"ok": True, "data": {"files": files, "has_more": False}},
+                    )
+                return subprocess.CompletedProcess(args, 3, "", "raw SECRET failure")
+
+            with self.assertRaises(mrl.ConnectorError) as caught:
+                mrl.bootstrap(
+                    "https://private.invalid/drive/folder/rootfolder123",
+                    state / "CONNECT.md",
+                    runner=runner,
+                )
+            self.assertEqual(str(caught.exception), "private contract download failed")
+
+    def test_malformed_missing_scope_envelopes_are_not_reflected(self):
+        unsafe_errors = (
+            {
+                "type": "authorization", "subtype": "missing_scope",
+                "code": True, "missing_scopes": ["docs:permission.member:auth"],
+            },
+            {
+                "type": "authorization", "subtype": "missing_scope",
+                "code": 99991679, "missing_scopes": "docs:permission.member:auth",
+            },
+            {
+                "type": "authorization", "subtype": "missing_scope",
+                "code": 99991679, "missing_scopes": ["docs:permission.member:auth;SECRET"],
+            },
+            {
+                "type": "authorization", "subtype": "missing_scope",
+                "code": 99991679,
+                "missing_scopes": [
+                    "docs:permission.member:auth", "docs:permission.member:auth",
+                ],
+            },
+        )
+        for error in unsafe_errors:
+            with self.subTest(error=error):
+                process = subprocess.CompletedProcess(
+                    ["lark-cli"], 3, "", json.dumps({"error": error}),
+                )
+                diagnostic = mrl._sanitized_lark_failure(process, "operation")
+                self.assertEqual(str(diagnostic), "operation failed")
+                self.assertNotIn("SECRET", str(diagnostic))
+
+
+class StateCheckTests(unittest.TestCase):
+    def test_absent_state_is_creatable_without_mutation(self):
+        self.assertTrue(hasattr(mrl, "state_check"), "state_check must exist")
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "not-created"
+            result = mrl.state_check(state)
+            self.assertEqual(result, {
+                "platform": "windows" if os.name == "nt" else "posix",
+                "status": "absent_creatable",
+                "safe": True,
+                "migration_required": False,
+            })
+            self.assertFalse(state.exists())
+
+    def test_state_check_returns_sanitized_unsafe_reasons(self):
+        self.assertTrue(hasattr(mrl, "state_check"), "state_check must exist")
+        self.assertTrue(hasattr(mrl, "_state_path_status"), "state status inspector must exist")
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state"
+            state.mkdir(mode=0o700)
+            for status in (
+                "owner_unapproved",
+                "unapproved_inherited_allow",
+                "acl_unreadable",
+                "reparse_or_junction",
+            ):
+                with self.subTest(status=status), mock.patch.object(
+                    mrl, "_state_path_status", return_value=status,
+                ):
+                    result = mrl.state_check(state)
+                    self.assertEqual(result["status"], status)
+                    self.assertFalse(result["safe"])
+                    self.assertTrue(result["migration_required"])
+                    self.assertNotIn(str(state), json.dumps(result))
+
+    def test_state_check_cli_exit_codes_match_safety(self):
+        with tempfile.TemporaryDirectory() as directory:
+            absent = Path(directory) / "not-created"
+            process = subprocess.run(
+                [sys.executable, str(SCRIPT), "state-check", "--state-dir", str(absent)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(process.returncode, 0, process.stderr)
+            self.assertEqual(json.loads(process.stdout)["status"], "absent_creatable")
+            unsafe = Path(directory) / "unsafe"
+            unsafe.mkdir(mode=0o755)
+            os.chmod(unsafe, 0o755)
+            refused = subprocess.run(
+                [sys.executable, str(SCRIPT), "state-check", "--state-dir", str(unsafe)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(refused.returncode, 2, refused.stderr)
+            self.assertFalse(json.loads(refused.stdout)["safe"])
+
+    def test_absent_state_with_unsafe_parent_is_not_creatable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory) / "parent"
+            parent.mkdir()
+            state = parent / "not-created"
+            with mock.patch.object(
+                mrl, "_require_no_windows_reparse_components",
+                side_effect=mrl.ConnectorError("unsafe reparse"),
+            ):
+                with mock.patch.object(mrl, "os", wraps=os) as mocked_os:
+                    mocked_os.name = "nt"
+                    self.assertEqual(
+                        mrl._state_path_status(state),
+                        "reparse_or_junction",
+                    )
+
+    def test_absent_state_with_missing_parent_is_not_creatable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "missing-parent" / "not-created"
+            self.assertEqual(mrl._state_path_status(state), "parent_unavailable")
+            self.assertFalse(mrl.state_check(state)["safe"])
+            self.assertFalse(state.exists())
+
+    def test_state_check_converts_filesystem_validation_failure_to_safe_reason(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "not-created"
+            with mock.patch.object(
+                mrl, "_unsafe_link_or_reparse",
+                side_effect=mrl.ConnectorError("filesystem path could not be validated safely"),
+            ):
+                result = mrl.state_check(state)
+            self.assertEqual(result["status"], "acl_unreadable")
+            self.assertFalse(result["safe"])
+
 
 class QuotaTests(unittest.TestCase):
     def test_full_offset_pagination(self):
@@ -732,7 +939,7 @@ class DownloadTests(unittest.TestCase):
 
 
 class WindowsPortTests(unittest.TestCase):
-    def test_helper_imports_and_reports_v113(self):
+    def test_helper_imports_and_reports_v114(self):
         imported = subprocess.run(
             [
                 sys.executable,
@@ -748,7 +955,7 @@ class WindowsPortTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(imported.returncode, 0, imported.stderr)
-        self.assertEqual(imported.stdout.strip(), "1.1.3")
+        self.assertEqual(imported.stdout.strip(), "1.1.4")
         version = subprocess.run(
             [sys.executable, str(SCRIPT), "--version"],
             capture_output=True,
@@ -756,7 +963,7 @@ class WindowsPortTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(version.returncode, 0, version.stderr)
-        self.assertEqual(version.stdout.strip(), "1.1.3")
+        self.assertEqual(version.stdout.strip(), "1.1.4")
 
     def test_paths_with_spaces_support_bootstrap_fetch_search_and_quota(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -880,6 +1087,42 @@ class WindowsPortTests(unittest.TestCase):
             self.assertFalse((root / "papers with spaces" / "Valid Paper.pdf").exists())
             self.assertFalse((state / "pending.json").exists())
 
+    def test_download_reports_sanitized_missing_scope_and_keeps_journal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            index = root / "index.sqlite3"
+            make_index(index)
+            state = root / "state"
+            state.mkdir(mode=0o700)
+            journal = state / "pending.json"
+            envelope = {"error": {
+                "type": "authorization",
+                "subtype": "missing_scope",
+                "code": 99991679,
+                "missing_scopes": ["docs:permission.member:auth"],
+                "message": "SECRET",
+            }}
+
+            def runner(args, **kwargs):
+                if args[1] == "whoami":
+                    return completed(args, payload={"onBehalfOf": {"openId": "ou_test", "userName": "Tester"}})
+                if args[1:3] == ["base", "+record-search"]:
+                    return completed(args, payload=base_payload([]))
+                if args[1:3] == ["drive", "+download"]:
+                    return subprocess.CompletedProcess(args, 3, "", json.dumps(envelope))
+                raise AssertionError(args)
+
+            with self.assertRaises(mrl.ConnectorError) as caught:
+                mrl.download_files(
+                    index, [11], root / "papers", "base", "Codex Desktop",
+                    journal, runner=runner, now=NOW, lock_path=state / "lock",
+                )
+            message = str(caught.exception)
+            self.assertIn("authorization/missing_scope", message)
+            self.assertIn("docs:permission.member:auth", message)
+            self.assertNotIn("SECRET", message)
+            self.assertTrue(journal.exists())
+
     def test_target_created_during_download_is_not_overwritten(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -951,6 +1194,7 @@ class WindowsPortTests(unittest.TestCase):
                 mrl._windows_private_acl_is_valid(private, sid),
                 f"current_sid={sid}; icacls={acl.stdout!r}; stderr={acl.stderr!r}",
             )
+            self.assertEqual(mrl.state_check(private)["status"], "ready")
             mrl._secure_state_dir(private)
             secret = private / "secret.bin"
             secret.write_bytes(b"private")
@@ -974,8 +1218,29 @@ class WindowsPortTests(unittest.TestCase):
             )
             if granted.returncode != 0:
                 self.skipTest("this Windows runner cannot add a synthetic read ACE")
-            with self.assertRaisesRegex(mrl.ConnectorError, "ACL is not owner-only"):
+            with self.assertRaisesRegex(
+                mrl.ConnectorError, "ACL is unsafe \\(unapproved_.*_allow\\)",
+            ):
                 mrl._secure_state_dir(private)
+
+    @unittest.skipUnless(os.name == "nt", "native Windows ACL semantics")
+    def test_preinherited_broad_acl_state_directory_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory) / "broad parent"
+            parent.mkdir()
+            granted = subprocess.run(
+                ["icacls", str(parent), "/grant", "*S-1-1-0:(OI)(CI)R", "/Q"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if granted.returncode != 0:
+                self.skipTest("this Windows runner cannot add an inherited read ACE")
+            inherited = parent / "precreated state"
+            inherited.mkdir()
+            result = mrl.state_check(inherited)
+            self.assertEqual(result["status"], "unapproved_inherited_allow")
+            self.assertFalse(result["safe"])
 
     @unittest.skipUnless(os.name == "nt", "native Windows command resolution")
     def test_run_lark_resolves_project_local_official_package_layout(self):
@@ -1052,8 +1317,24 @@ class PublicContractTests(unittest.TestCase):
     def test_frontmatter_version_is_exact(self):
         text = (ROOT / "skills/lark-paper-library/SKILL.md").read_text(encoding="utf-8")
         frontmatter = text.split("---", 2)[1]
-        self.assertIn("\nversion: 1.1.3\n", "\n" + frontmatter)
-        self.assertEqual(mrl.VERSION, "1.1.3")
+        self.assertIn("\nversion: 1.1.4\n", "\n" + frontmatter)
+        self.assertEqual(mrl.VERSION, "1.1.4")
+
+    def test_documented_user_oauth_scopes_are_exact_minimum(self):
+        text = (ROOT / "skills/lark-paper-library/SKILL.md").read_text(encoding="utf-8")
+        matches = re.findall(r'lark-cli auth login --scope "([^"]+)"', text)
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].split(), [
+            "drive:drive.metadata:readonly",
+            "drive:file:download",
+            "docs:permission.member:auth",
+            "base:record:read",
+            "base:record:create",
+        ])
+        lowered = " ".join(text.lower().split())
+        self.assertIn("at least these five", lowered)
+        self.assertIn("additional legitimate scopes", lowered)
+        self.assertNotIn("auth login --domain all", lowered)
 
     def test_public_tree_has_no_forbidden_fallbacks(self):
         files = [ROOT / "AGENTS.md", ROOT / "README.md", ROOT / "FAQ.md", ROOT / "DEPLOYMENT.md", ROOT / "skills/lark-paper-library/SKILL.md", SCRIPT]
@@ -1062,9 +1343,24 @@ class PublicContractTests(unittest.TestCase):
         self.assertNotIn("drive +search", text)
         self.assertNotIn("download-ledger.jsonl", text)
 
+    def test_windows_state_guidance_is_fail_closed(self):
+        skill = (ROOT / "skills/lark-paper-library/SKILL.md").read_text(encoding="utf-8").lower()
+        faq = (ROOT / "FAQ.md").read_text(encoding="utf-8").lower()
+        combined = skill + "\n" + faq
+        for phrase in (
+            "state-check",
+            "do not pre-create",
+            "explorer",
+            "powershell",
+            "python 3.13",
+            "never repairs",
+            "separate approval",
+        ):
+            self.assertIn(phrase, combined)
+
     def test_deployment_order_and_direct_faq_input_are_explicit(self):
         text = (ROOT / "DEPLOYMENT.md").read_text(encoding="utf-8")
-        release_step = "publish the v1.1.3 connector"
+        release_step = "publish the v1.1.4 connector"
         self.assertIn(release_step, text)
         if release_step in text:
             self.assertLess(

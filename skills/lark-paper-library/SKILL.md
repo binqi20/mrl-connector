@@ -1,6 +1,6 @@
 ---
 name: lark-paper-library
-version: 1.1.3
+version: 1.1.4
 description: "Search and download academic PDFs from the Management Research Library through a validated SQLite catalog, authoritative quotas, and hash-verified no-clobber installation."
 metadata:
   requires:
@@ -33,13 +33,15 @@ sqlite3 --version
 
 ```bash
 lark-cli config init
-lark-cli auth login --scope "drive:drive.metadata:readonly drive:file:download base:record:read base:record:create"
+lark-cli auth login --scope "drive:drive.metadata:readonly drive:file:download docs:permission.member:auth base:record:read base:record:create"
 lark-cli whoami --as user
 ```
 
-Use only the listed least-privilege scopes. If a scope is rejected, stop and
-report the exact missing scope to the user or maintainer. Do not request an
-all-domain authorization.
+The MRL workflow requires at least these five scopes. Additional legitimate
+scopes already used by the member's own agent may remain; the connector must
+not proactively request an all-domain authorization. If a required scope is
+rejected, stop and report the helper's sanitized error type, code, and missing
+scope to the user or maintainer.
 
 The authenticated account must already be a library viewer and have append
 permission on the Download Log Base. Agents never add members.
@@ -50,8 +52,26 @@ The user supplies the library folder URL privately. Use the helper to resolve
 `_tracking/CONNECT.md` by exact name and type across every Drive page and
 download it through a private temporary file:
 
+Set the helper path to the copy installed with this skill:
+
 ```bash
 HELPER="skills/lark-paper-library/scripts/mrl_connector.py"
+```
+
+On native Windows, inspect the state boundary before bootstrap:
+
+```bash
+python3 "$HELPER" state-check --state-dir "$HOME/.mrl"
+```
+
+`ready` and `absent_creatable` are safe. Do not pre-create `.mrl` using
+Explorer or ordinary PowerShell; let Python 3.13 and the connector create an
+absent directory with its protected ACL. The connector never repairs ACLs.
+If an existing directory is refused, inspect its contents read-only and obtain
+separate approval before any migration. Never delete, reset, or recursively
+rewrite it to bypass the check.
+
+```bash
 python3 "$HELPER" bootstrap \
   --folder-url "<private library folder URL>" \
   --output "$HOME/.mrl/CONNECT.md"

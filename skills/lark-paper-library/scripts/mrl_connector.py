@@ -96,7 +96,7 @@ else:
     import fcntl
 
 
-VERSION = "1.1.3"
+VERSION = "1.1.4"
 EXIT_REFUSED = 2
 MAX_OPERATION = 15
 MAX_ROLLING = 80
@@ -142,6 +142,7 @@ REQUIRED_COLUMNS = {
     "version_note", "publication_version", "match_method",
 }
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_MISSING_SCOPE_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}:[a-z][a-z0-9_.:-]{0,127}$")
 
 
 class ConnectorError(RuntimeError):
@@ -258,7 +259,7 @@ def _windows_current_sid() -> str:
         _KERNEL32.CloseHandle(token)
 
 
-def _windows_private_acl_is_valid(path: Path, current_sid: str) -> bool:
+def _windows_private_acl_status(path: Path, current_sid: str) -> str:
     """Verify that only the user, SYSTEM, or Administrators receive access."""
 
     owner_security_information = 0x00000001
@@ -279,25 +280,22 @@ def _windows_private_acl_is_valid(path: Path, current_sid: str) -> bool:
     owner = wintypes.LPVOID()
     dacl = wintypes.LPVOID()
     descriptor = wintypes.LPVOID()
-    result = _ADVAPI32.GetNamedSecurityInfoW(
-        str(path),
-        se_file_object,
-        owner_security_information | dacl_security_information,
-        ctypes.byref(owner),
-        None,
-        ctypes.byref(dacl),
-        None,
-        ctypes.byref(descriptor),
-    )
+    try:
+        result = _ADVAPI32.GetNamedSecurityInfoW(
+            str(path), se_file_object, owner_security_information | dacl_security_information,
+            ctypes.byref(owner), None, ctypes.byref(dacl), None, ctypes.byref(descriptor),
+        )
+    except Exception:
+        return "acl_unreadable"
     if result != 0 or not owner or not dacl or not descriptor:
         if descriptor:
             _KERNEL32.LocalFree(ctypes.cast(descriptor, wintypes.HLOCAL))
-        return False
+        return "acl_unreadable"
 
-    def sid_text(pointer: wintypes.LPVOID) -> str:
+    def sid_text(pointer: wintypes.LPVOID) -> str | None:
         output = wintypes.LPWSTR()
         if not _ADVAPI32.ConvertSidToStringSidW(pointer, ctypes.byref(output)):
-            return ""
+            return None
         try:
             return str(output.value or "")
         finally:
@@ -309,8 +307,10 @@ def _windows_private_acl_is_valid(path: Path, current_sid: str) -> bool:
         # object owner even though the directory was created by this process.
         # Administrators already remain an unavoidable trusted recovery
         # principal in Python 3.13's protected 0o700 ACL.
+        if owner_sid is None:
+            return "acl_unreadable"
         if owner_sid not in {current_sid, "S-1-5-32-544"}:
-            return False
+            return "owner_unapproved"
         information = AclSizeInformation()
         if not _ADVAPI32.GetAclInformation(
             dacl,
@@ -318,13 +318,14 @@ def _windows_private_acl_is_valid(path: Path, current_sid: str) -> bool:
             ctypes.sizeof(information),
             acl_size_information_class,
         ):
-            return False
+            return "acl_unreadable"
         current_has_write_access = False
         for index in range(information.ace_count):
             ace = wintypes.LPVOID()
             if not _ADVAPI32.GetAce(dacl, index, ctypes.byref(ace)):
-                return False
+                return "acl_unreadable"
             ace_type = ctypes.c_ubyte.from_address(ace.value).value
+            ace_flags = ctypes.c_ubyte.from_address(ace.value + 1).value
             # Parse the simple ACCESS_ALLOWED_ACE_TYPE only. Reject every
             # other allow-grant form rather than guessing a variable SID offset.
             if ace_type == 0:
@@ -333,15 +334,25 @@ def _windows_private_acl_is_valid(path: Path, current_sid: str) -> bool:
                 # These paths contain private coordinates and journals, so an
                 # unapproved read grant is an exposure too.  Reject every
                 # effective allow grant to an unapproved SID.
+                if trustee is None:
+                    return "acl_unreadable"
                 if trustee not in allowed_sids and mask:
-                    return False
+                    return "unapproved_inherited_allow" if ace_flags & 0x10 else "unapproved_explicit_allow"
                 if trustee in {current_sid, owner_rights_sid, "S-1-5-32-544"} and mask & (0x10000000 | write_or_delete_access):
                     current_has_write_access = True
             elif ace_type in {4, 5, 9, 11}:
-                return False
-        return current_has_write_access
+                return "unsupported_allow_ace"
+        return "ready" if current_has_write_access else "no_approved_writer"
+    except Exception:
+        return "acl_unreadable"
     finally:
         _KERNEL32.LocalFree(ctypes.cast(descriptor, wintypes.HLOCAL))
+
+
+def _windows_private_acl_is_valid(path: Path, current_sid: str) -> bool:
+    """Compatibility wrapper for callers that need a boolean ACL verdict."""
+
+    return _windows_private_acl_status(path, current_sid) == "ready"
 
 
 def _ensure_windows_private_acl(path: Path) -> None:
@@ -350,10 +361,13 @@ def _ensure_windows_private_acl(path: Path) -> None:
     if os.name != "nt":
         return
     _require_no_windows_reparse_components(path)
-    current_sid = _windows_current_sid()
-    if _windows_private_acl_is_valid(path, current_sid):
+    try:
+        status = _windows_private_acl_status(path, _windows_current_sid())
+    except Exception:
+        status = "acl_unreadable"
+    if status == "ready":
         return
-    raise ConnectorError("Windows private-state ACL is not owner-only")
+    raise ConnectorError(f"Windows private-state ACL is unsafe ({status})")
 
 
 def _set_private_file(path: Path) -> None:
@@ -528,9 +542,55 @@ def run_lark(
         raise ConnectorError("lark-cli could not be started") from exc
 
 
+def _sanitized_lark_failure(
+    process: subprocess.CompletedProcess[str], purpose: str
+) -> ConnectorError:
+    """Return an allowlisted authorization diagnostic, never raw CLI text."""
+
+    for raw in (process.stdout, process.stderr):
+        if not isinstance(raw, str) or not raw.strip() or len(raw) > 64 * 1024:
+            continue
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        error = payload.get("error")
+        if not isinstance(error, dict):
+            continue
+        error_type = error.get("type")
+        subtype = error.get("subtype")
+        code = error.get("code")
+        scopes = error.get("missing_scopes")
+        if error_type != "authorization" or subtype != "missing_scope":
+            continue
+        if isinstance(code, bool) or not isinstance(code, (int, str)):
+            continue
+        code_text = str(code)
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", code_text):
+            continue
+        if (
+            not isinstance(scopes, list)
+            or not 1 <= len(scopes) <= 16
+            or any(not isinstance(scope, str) for scope in scopes)
+        ):
+            continue
+        unique_scopes = list(dict.fromkeys(scopes))
+        if len(unique_scopes) != len(scopes) or any(
+            not _MISSING_SCOPE_RE.fullmatch(scope) for scope in unique_scopes
+        ):
+            continue
+        return ConnectorError(
+            f"{purpose} failed: authorization/missing_scope; "
+            f"error_code={code_text}; missing_scopes={','.join(unique_scopes)}"
+        )
+    return ConnectorError(f"{purpose} failed")
+
+
 def _parse_json_process(process: subprocess.CompletedProcess[str], purpose: str) -> dict[str, Any]:
     if process.returncode != 0:
-        raise ConnectorError(f"{purpose} failed")
+        raise _sanitized_lark_failure(process, purpose)
     try:
         payload = json.loads(process.stdout)
     except (TypeError, json.JSONDecodeError) as exc:
@@ -591,7 +651,7 @@ def validate_index(path: Path, *, now: datetime | None = None) -> dict[str, Any]
             columns = {row[1] for row in db.execute("PRAGMA table_info(mrl_index)")}
             missing = REQUIRED_COLUMNS - columns
             if missing:
-                raise ConnectorError("index schema is incompatible with connector v1.1.3")
+                raise ConnectorError("index schema is incompatible with connector v1.1.4")
             meta = dict(db.execute("SELECT key,value FROM index_meta"))
             built_at = _parse_time(meta.get("built_at", ""))
             age = current - built_at
@@ -688,6 +748,63 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _state_path_status(path: Path) -> str:
+    """Inspect the state-directory boundary without creating or changing it."""
+
+    path = Path(path).expanduser()
+    try:
+        if _unsafe_link_or_reparse(path):
+            return "reparse_or_junction"
+        if not path.exists():
+            parent = path.parent
+            if (
+                not parent.exists()
+                or _unsafe_link_or_reparse(parent)
+                or not parent.is_dir()
+            ):
+                return "parent_unavailable"
+            if os.name == "nt":
+                try:
+                    _require_no_windows_reparse_components(parent)
+                except ConnectorError as exc:
+                    return (
+                        "reparse_or_junction"
+                        if "reparse" in str(exc).lower() else "acl_unreadable"
+                    )
+            return "absent_creatable"
+        if not path.is_dir():
+            return "not_directory"
+        if os.name == "nt":
+            try:
+                _require_no_windows_reparse_components(path)
+                return _windows_private_acl_status(path, _windows_current_sid())
+            except ConnectorError as exc:
+                if "reparse" in str(exc).lower():
+                    return "reparse_or_junction"
+                return "acl_unreadable"
+        return "permissions_unapproved" if path.stat().st_mode & 0o077 else "ready"
+    except ConnectorError as exc:
+        return (
+            "reparse_or_junction"
+            if "reparse" in str(exc).lower() else "acl_unreadable"
+        )
+    except OSError:
+        return "acl_unreadable"
+
+
+def state_check(path: Path) -> dict[str, Any]:
+    """Return a sanitized, read-only verdict for a connector state path."""
+
+    status = _state_path_status(Path(path))
+    safe = status in {"ready", "absent_creatable"}
+    return {
+        "platform": "windows" if os.name == "nt" else "posix",
+        "status": status,
+        "safe": safe,
+        "migration_required": not safe,
+    }
+
+
 def _secure_state_dir(path: Path) -> None:
     if path.exists():
         if _unsafe_link_or_reparse(path) or not path.is_dir():
@@ -718,7 +835,9 @@ def fetch_index(file_token: str, output: Path, *, runner: Runner = subprocess.ru
             runner=runner,
             cwd=temp_dir,
         )
-        if process.returncode != 0 or not candidate.is_file() or _unsafe_link_or_reparse(candidate):
+        if process.returncode != 0:
+            raise _sanitized_lark_failure(process, "exact-token index download")
+        if not candidate.is_file() or _unsafe_link_or_reparse(candidate):
             raise ConnectorError("exact-token index download failed")
         _set_private_file(candidate)
         result = validate_index(candidate)
@@ -806,7 +925,9 @@ def bootstrap(folder_url: str, output: Path, *, runner: Runner = subprocess.run)
             runner=runner,
             cwd=temp_dir,
         )
-        if process.returncode != 0 or _unsafe_link_or_reparse(candidate) or not candidate.is_file():
+        if process.returncode != 0:
+            raise _sanitized_lark_failure(process, "private contract download")
+        if _unsafe_link_or_reparse(candidate) or not candidate.is_file():
             raise ConnectorError("private contract download failed")
         size = candidate.stat().st_size
         if not 1 <= size <= 1024 * 1024:
@@ -1434,6 +1555,10 @@ def _download_files_locked(
             )
             expected_size = int(row["file_size"])
             expected_sha = str(row["sha256"])
+            if process.returncode != 0:
+                diagnostic = _sanitized_lark_failure(process, "paper PDF download")
+                if "authorization/missing_scope" in str(diagnostic):
+                    raise diagnostic
             if process.returncode != 0 or not _pdf_matches(temporary, expected_size, expected_sha):
                 if temporary.exists() or temporary.is_symlink():
                     temporary.unlink()
@@ -1496,6 +1621,8 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap_parser = sub.add_parser("bootstrap", help="resolve and privately download _tracking/CONNECT.md")
     bootstrap_parser.add_argument("--folder-url", required=True)
     bootstrap_parser.add_argument("--output", type=Path, default=Path("~/.mrl/CONNECT.md").expanduser())
+    state = sub.add_parser("state-check", help="inspect the local connector state boundary read-only")
+    state.add_argument("--state-dir", type=Path, default=Path("~/.mrl").expanduser())
     fetch = sub.add_parser("fetch-index", help="download and validate the exact pinned SQLite index")
     fetch.add_argument("--file-token", required=True)
     fetch.add_argument("--output", type=Path, default=Path("~/.mrl/mrl-index.sqlite3").expanduser())
@@ -1524,7 +1651,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        if args.command == "bootstrap":
+        if args.command == "state-check":
+            result = state_check(args.state_dir)
+        elif args.command == "bootstrap":
             result = bootstrap(args.folder_url, args.output)
         elif args.command == "fetch-index":
             result = fetch_index(args.file_token, args.output)
@@ -1552,6 +1681,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             result = reconcile_pending(args.base_token, args.agent, DEFAULT_JOURNAL)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=2))
+        if args.command == "state-check" and not result.get("safe"):
+            return EXIT_REFUSED
         if args.command == "download" and result.get("failed"):
             return 1
         return 0

@@ -1,4 +1,4 @@
-# Connector v1.1.3 deployment checkpoint
+# Connector v1.1.4 deployment checkpoint
 
 This is a maintainer-only publication order. It is deliberately separate from
 the member workflow in `SKILL.md`.
@@ -7,21 +7,21 @@ the member workflow in `SKILL.md`.
 
 1. Require the compatible v1.1 MRL SQLite index first. Its `mrl_index` table
    must include the derived `publication_version` column, exact conservative
-   values, and a `built_at` no older than seven days. Connector v1.1.3 does not
+   values, and a `built_at` no older than seven days. Connector v1.1.4 does not
    require an index rebuild or schema change.
 2. Download that pinned SQLite artifact by token and verify integrity, schema,
    row count, uniqueness, freshness, and representative searches using the
-   reviewed v1.1.3 helper, including titles with curly apostrophes and en/em
+   reviewed v1.1.4 helper, including titles with curly apostrophes and en/em
    dashes.
 3. Only after step 2 passes, require the native Windows Python 3.13 job and the
-   complete macOS/Linux jobs to pass, then publish the v1.1.3 connector
+   complete macOS/Linux jobs to pass, then publish the v1.1.4 connector
    contract and FAQ by
    in-place overwrite of their existing pinned Feishu files. Never delete and
    recreate either file.
 4. Download both pinned documents by their unchanged tokens and verify the
    readback bytes.
 5. Publish the public repository release last. The SKILL frontmatter, Git tag,
-   and GitHub release must all identify v1.1.3.
+   and GitHub release must all identify v1.1.4.
 
 Publishing the connector before validating the compatible index could make
 member search fail closed. Validating the existing index first avoids that

@@ -1,4 +1,4 @@
-# Management Research Library — FAQ (connector v1.1.3)
+# Management Research Library — FAQ (connector v1.1.4)
 
 Coordinates are deliberately absent. The maintainer shares the library folder
 URL privately; `_tracking/CONNECT.md` supplies runtime tokens. Never place
@@ -13,8 +13,11 @@ anonymous API path. Confirm the identity with `lark-cli whoami --as user`.
 
 **Which authorization should I use?**
 
-Use only the explicit least-privilege scopes in `SKILL.md`. If a scope is
-rejected or missing, stop and report it. Do not request broad all-domain access.
+The workflow needs at least the five explicit scopes in `SKILL.md`. A member's
+agent may retain other legitimate scopes it already uses, but the connector
+must not proactively request broad all-domain access. If a required scope is
+missing, the helper reports only the sanitized authorization type, code, and
+scope; stop and complete that exact incremental authorization.
 
 **What can an agent write?**
 
@@ -107,6 +110,13 @@ reserved-name and junction/reparse checks, and atomic no-clobber installation.
 It fails closed if those protections cannot be verified. Do not patch out a
 platform check or replace the reviewed helper with ad hoc commands.
 
+Before bootstrap, run `state-check` for the intended `.mrl` directory. Do not
+pre-create `.mrl` with Explorer or ordinary PowerShell. Let Python 3.13 and the
+connector create an absent directory with a protected ACL. The connector never
+repairs ACLs. If an existing directory is refused because of its owner,
+inherited allow ACE, unreadable ACL, or reparse/junction boundary, inspect its
+contents read-only and obtain separate approval before any migration.
+
 **What is the pending-download-log journal?**
 
 Before a remote PDF transfer, the helper creates a private durable journal. It
@@ -140,13 +150,22 @@ rows.
 **`permission denied` / `not exist`** — Confirm the authenticated Feishu user
 was invited and has Base append permission. Stop; do not loop retries.
 
+**`authorization/missing_scope`** — Grant only the exact missing required
+scope reported by the helper. Drive downloads require both
+`drive:file:download` and `docs:permission.member:auth`. Do not use an
+all-domain authorization as a shortcut.
+
+**Windows private-state refusal** — Run `state-check`; do not weaken the check,
+reset ACL inheritance, delete the directory, or migrate it without a read-only
+content inspection and separate approval.
+
 **Index download fails** — Report the pinned-token failure. Do not locate an
 index by name or use Drive paper search.
 
 **Index is stale** — Ask the maintainer for an explicit MRL refresh. Do not
 bypass the seven-day policy.
 
-**Why might v1.1.3 refuse an older index?** — v1.1 requires the conservative
+**Why might v1.1.4 refuse an older index?** — v1.1 requires the conservative
 derived `publication_version` field. Maintainers publish and verify the
 compatible index before deploying the v1.1 connector and FAQ; see
 `DEPLOYMENT.md` in the public repository.

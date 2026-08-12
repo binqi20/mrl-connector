@@ -1,4 +1,4 @@
-# Management Research Library — Connector v1.1.3
+# Management Research Library — Connector v1.1.4
 
 Connect an AI agent to the Management Research Library, a shared read-only
 Feishu (Lark) collection of academic PDFs indexed by a verified SQLite catalog.
@@ -10,7 +10,7 @@ URL privately. The private `_tracking/CONNECT.md` supplies runtime coordinates.
 
 ## Safety model
 
-Connector v1.1.3 is fail closed:
+Connector v1.1.4 is fail closed:
 
 - Paper search uses only a validated SQLite index; it never crawls Drive or
   falls back to filename search.
@@ -28,6 +28,9 @@ Connector v1.1.3 is fail closed:
   platform's process-wide file lock, owner-private state permissions, durable
   replacement, junction/reparse checks, and atomic no-clobber installation;
   macOS and Linux retain the established POSIX security behavior.
+- A read-only `state-check` distinguishes a safely creatable absent state from
+  unsafe ownership, inherited allow ACEs, unreadable ACLs, and reparse points.
+  It never creates a directory or repairs an ACL.
 - A durable pending journal blocks later downloads until an uncertain audit-log
   append is reconciled.
 - Publication status is conservative: only the exact derived values
@@ -43,9 +46,10 @@ writes are appending to the `download_log` and `feedback` tables.
 
 1. Install Feishu's official `lark-cli`, Python 3, and SQLite 3. On native
    Windows, use Python 3.13 or newer.
-2. Authenticate with the least-privilege scopes shown in
-   [`SKILL.md`](skills/lark-paper-library/SKILL.md). Broad all-domain
-   authorization is not supported.
+2. Authenticate with at least the five MRL scopes shown in
+   [`SKILL.md`](skills/lark-paper-library/SKILL.md). Other legitimate scopes
+   already used by the member's agent may remain; the connector does not
+   proactively request broad all-domain authorization.
 3. Give your agent the complete
    [`skills/lark-paper-library`](skills/lark-paper-library/) directory.
 4. Privately provide the folder URL shared by the maintainer. Never paste it
@@ -79,7 +83,7 @@ Never include library coordinates or credentials in either channel.
 
 Deployment is deliberately ordered: validate the existing compatible v1.1
 index with the reviewed helper first, then overwrite CONNECT and the reviewed
-FAQ in place, and publish the public v1.1.3 repository release last. See
+FAQ in place, and publish the public v1.1.4 repository release last. See
 [DEPLOYMENT.md](DEPLOYMENT.md) for the decision-complete order and
 byte-identical FAQ readback procedure.
 
