@@ -304,7 +304,12 @@ def _windows_private_acl_is_valid(path: Path, current_sid: str) -> bool:
             _KERNEL32.LocalFree(ctypes.cast(output, wintypes.HLOCAL))
 
     try:
-        if sid_text(owner) != current_sid:
+        owner_sid = sid_text(owner)
+        # An elevated Windows token can make BUILTIN\\Administrators the
+        # object owner even though the directory was created by this process.
+        # Administrators already remain an unavoidable trusted recovery
+        # principal in Python 3.13's protected 0o700 ACL.
+        if owner_sid not in {current_sid, "S-1-5-32-544"}:
             return False
         information = AclSizeInformation()
         if not _ADVAPI32.GetAclInformation(
@@ -330,7 +335,7 @@ def _windows_private_acl_is_valid(path: Path, current_sid: str) -> bool:
                 # effective allow grant to an unapproved SID.
                 if trustee not in allowed_sids and mask:
                     return False
-                if trustee in {current_sid, owner_rights_sid} and mask & (0x10000000 | write_or_delete_access):
+                if trustee in {current_sid, owner_rights_sid, "S-1-5-32-544"} and mask & (0x10000000 | write_or_delete_access):
                     current_has_write_access = True
             elif ace_type in {4, 5, 9, 11}:
                 return False
