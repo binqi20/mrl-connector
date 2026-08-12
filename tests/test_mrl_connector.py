@@ -580,7 +580,16 @@ class StateCheckTests(unittest.TestCase):
             self.assertEqual(json.loads(process.stdout)["status"], "absent_creatable")
             unsafe = Path(directory) / "unsafe"
             unsafe.mkdir(mode=0o755)
-            os.chmod(unsafe, 0o755)
+            if os.name == "nt":
+                granted = subprocess.run(
+                    ["icacls", str(unsafe), "/grant", "*S-1-1-0:(OI)(CI)R", "/Q"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(granted.returncode, 0, granted.stderr)
+            else:
+                os.chmod(unsafe, 0o755)
             refused = subprocess.run(
                 [sys.executable, str(SCRIPT), "state-check", "--state-dir", str(unsafe)],
                 capture_output=True,
