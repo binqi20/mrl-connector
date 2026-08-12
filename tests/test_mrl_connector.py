@@ -502,6 +502,18 @@ class IdentityTests(unittest.TestCase):
             mrl.whoami(runner=runner)
 
     def test_cli_malformed_identity_returns_two_without_traceback(self):
+        if os.name == "nt":
+            process = subprocess.run(
+                [sys.executable, str(SCRIPT), "quota", "--base-token", "fixture", "--requested", "0"],
+                capture_output=True,
+                text=True,
+                check=False,
+                env=dict(os.environ, PATH=""),
+            )
+            self.assertEqual(process.returncode, 2)
+            self.assertIn("refused: native lark-cli executable is unavailable", process.stderr)
+            self.assertNotIn("Traceback", process.stderr)
+            return
         with tempfile.TemporaryDirectory() as directory:
             executable = Path(directory) / "lark-cli"
             executable.write_text(
@@ -892,7 +904,7 @@ class WindowsPortTests(unittest.TestCase):
             )
             native.parent.mkdir(parents=True)
             native.write_bytes(b"fixture")
-            (native.parents[0] / "package.json").write_text(
+            (native.parents[1] / "package.json").write_text(
                 '{"name":"@larksuite/cli","version":"fixture"}',
                 encoding="utf-8",
             )
@@ -903,6 +915,60 @@ class WindowsPortTests(unittest.TestCase):
                 return completed(args)
 
             with mock.patch.dict(os.environ, {"PATH": directory + os.pathsep + os.environ.get("PATH", "")}):
+                mrl.run_lark(["--version"], runner=runner)
+            self.assertEqual(Path(seen[0][0][0]).resolve(), native.resolve())
+            self.assertFalse(seen[0][1].get("shell", False))
+
+    @unittest.skipUnless(os.name == "nt", "native Windows ACL semantics")
+    def test_mode_700_state_directory_acl_is_verified(self):
+        with tempfile.TemporaryDirectory() as directory:
+            private = Path(directory) / "private state"
+            private.mkdir(mode=0o700)
+            mrl._secure_state_dir(private)
+            secret = private / "secret.bin"
+            secret.write_bytes(b"private")
+            mrl._set_private_file(secret)
+            child = mrl._make_private_temp_dir(prefix="temporary-", parent=private)
+            mrl._secure_state_dir(child)
+
+    @unittest.skipUnless(os.name == "nt", "native Windows ACL semantics")
+    def test_windows_acl_with_everyone_read_grant_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            private = Path(directory) / "private state"
+            private.mkdir(mode=0o700)
+            granted = subprocess.run(
+                ["icacls", str(private), "/grant", "*S-1-1-0:(OI)(CI)R", "/Q"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if granted.returncode != 0:
+                self.skipTest("this Windows runner cannot add a synthetic read ACE")
+            with self.assertRaisesRegex(mrl.ConnectorError, "ACL is not owner-only"):
+                mrl._secure_state_dir(private)
+
+    @unittest.skipUnless(os.name == "nt", "native Windows command resolution")
+    def test_run_lark_resolves_project_local_official_package_layout(self):
+        with tempfile.TemporaryDirectory(prefix="project cli with spaces ") as directory:
+            node_modules = Path(directory) / "node_modules"
+            shim_dir = node_modules / ".bin"
+            shim_dir.mkdir(parents=True)
+            (shim_dir / "lark-cli.cmd").write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
+            package_root = node_modules / "@larksuite" / "cli"
+            native = package_root / "bin" / "lark-cli.exe"
+            native.parent.mkdir(parents=True)
+            native.write_bytes(b"fixture")
+            (package_root / "package.json").write_text(
+                '{"name":"@larksuite/cli","version":"fixture"}',
+                encoding="utf-8",
+            )
+            seen = []
+
+            def runner(args, **kwargs):
+                seen.append((args, kwargs))
+                return completed(args)
+
+            with mock.patch.dict(os.environ, {"PATH": str(shim_dir)}):
                 mrl.run_lark(["--version"], runner=runner)
             self.assertEqual(Path(seen[0][0][0]).resolve(), native.resolve())
             self.assertFalse(seen[0][1].get("shell", False))

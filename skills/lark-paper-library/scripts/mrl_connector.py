@@ -265,7 +265,8 @@ def _windows_private_acl_is_valid(path: Path, current_sid: str) -> bool:
     dacl_security_information = 0x00000004
     se_file_object = 1
     acl_size_information_class = 2
-    allowed_sids = {current_sid, "S-1-5-18", "S-1-5-32-544"}
+    owner_rights_sid = "S-1-3-4"
+    allowed_sids = {current_sid, owner_rights_sid, "S-1-5-18", "S-1-5-32-544"}
     write_or_delete_access = 0x00010116
 
     class AclSizeInformation(ctypes.Structure):
@@ -324,11 +325,12 @@ def _windows_private_acl_is_valid(path: Path, current_sid: str) -> bool:
             if ace_type == 0:
                 mask = ctypes.c_uint32.from_address(ace.value + 4).value
                 trustee = sid_text(wintypes.LPVOID(ace.value + 8))
-                # Read-only inherited grants do not expose secret contents for
-                # modification, but any unapproved writer/deleter does.
-                if trustee not in allowed_sids and mask & write_or_delete_access:
+                # These paths contain private coordinates and journals, so an
+                # unapproved read grant is an exposure too.  Reject every
+                # effective allow grant to an unapproved SID.
+                if trustee not in allowed_sids and mask:
                     return False
-                if trustee == current_sid and mask & (0x10000000 | write_or_delete_access):
+                if trustee in {current_sid, owner_rights_sid} and mask & (0x10000000 | write_or_delete_access):
                     current_has_write_access = True
             elif ace_type in {4, 5, 9, 11}:
                 return False
@@ -470,6 +472,9 @@ def _resolved_lark_executable(*, required: bool) -> str:
             # npm's global Windows layout commonly keeps the package under
             # node_modules while placing the .cmd shim in the prefix root.
             shim_path.parent.parent / "node_modules" / "@larksuite" / "cli",
+            # A project-local npm shim lives in node_modules/.bin while the
+            # package itself is a sibling under node_modules/@larksuite/cli.
+            shim_path.parent.parent / "@larksuite" / "cli",
         ]
         for package_root in package_roots:
             package_json = package_root / "package.json"
