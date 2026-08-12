@@ -1450,7 +1450,7 @@ def _download_files_locked(
                 _install_no_clobber(temporary, target)
             except FileExistsError as exc:
                 raise ConnectorError("target appeared during download; no file was overwritten") from exc
-            with target.open("rb") as installed:
+            with target.open("r+b" if os.name == "nt" else "rb") as installed:
                 os.fsync(installed.fileno())
             if temporary.exists():
                 temporary.unlink()

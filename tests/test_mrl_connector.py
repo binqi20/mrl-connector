@@ -355,7 +355,10 @@ class IndexTests(unittest.TestCase):
 
             result = mrl.fetch_index("exact-runtime-token", output, runner=runner)
             self.assertEqual(result["rows"], 1)
-            self.assertEqual(oct(output.stat().st_mode & 0o777), "0o600")
+            if os.name == "nt":
+                mrl._set_private_file(output)
+            else:
+                self.assertEqual(oct(output.stat().st_mode & 0o777), "0o600")
             self.assertIn("exact-runtime-token", seen[0])
             self.assertNotIn("+search", seen[0])
 
@@ -388,7 +391,10 @@ class BootstrapTests(unittest.TestCase):
             result = mrl.bootstrap("https://private.invalid/drive/folder/rootfolder123", output, runner=runner)
             self.assertEqual(result["status"], "ready")
             self.assertNotIn("token", json.dumps(result))
-            self.assertEqual(oct(output.stat().st_mode & 0o777), "0o600")
+            if os.name == "nt":
+                mrl._set_private_file(output)
+            else:
+                self.assertEqual(oct(output.stat().st_mode & 0o777), "0o600")
             self.assertEqual([item.get("page_token") for item in listed[:2]], [None, "page2"])
 
     def test_ambiguous_contract_path_refuses_before_download(self):
