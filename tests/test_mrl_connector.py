@@ -668,7 +668,10 @@ class DownloadTests(unittest.TestCase):
             with self.assertRaisesRegex(mrl.ConnectorError, "unconfirmed"):
                 mrl.download_files(index, [11], root / "papers", "base", "Codex Desktop", journal, runner=runner, now=NOW, lock_path=state / "lock")
             self.assertTrue(journal.exists())
-            self.assertEqual(oct(journal.stat().st_mode & 0o777), "0o600")
+            if os.name == "nt":
+                mrl._set_private_file(journal)
+            else:
+                self.assertEqual(oct(journal.stat().st_mode & 0o777), "0o600")
 
     def test_reconcile_confirms_exact_pending_record_and_unblocks(self):
         with tempfile.TemporaryDirectory() as directory:
