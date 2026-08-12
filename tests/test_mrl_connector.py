@@ -924,6 +924,17 @@ class WindowsPortTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             private = Path(directory) / "private state"
             private.mkdir(mode=0o700)
+            sid = mrl._windows_current_sid()
+            acl = subprocess.run(
+                ["icacls", str(private)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertTrue(
+                mrl._windows_private_acl_is_valid(private, sid),
+                f"current_sid={sid}; icacls={acl.stdout!r}; stderr={acl.stderr!r}",
+            )
             mrl._secure_state_dir(private)
             secret = private / "secret.bin"
             secret.write_bytes(b"private")
@@ -936,6 +947,9 @@ class WindowsPortTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             private = Path(directory) / "private state"
             private.mkdir(mode=0o700)
+            self.assertTrue(
+                mrl._windows_private_acl_is_valid(private, mrl._windows_current_sid())
+            )
             granted = subprocess.run(
                 ["icacls", str(private), "/grant", "*S-1-1-0:(OI)(CI)R", "/Q"],
                 capture_output=True,
