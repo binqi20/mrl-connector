@@ -419,7 +419,11 @@ def _windows_move(source: Path, target: Path, *, replace: bool) -> None:
 
 
 def _durable_replace(source: Path, target: Path) -> None:
-    with Path(source).open("rb") as handle:
+    # Windows' _commit (used by os.fsync) requires a writable descriptor even
+    # when the caller only needs to flush bytes that another process wrote.
+    # POSIX retains the established read-only flush path.
+    mode = "r+b" if os.name == "nt" else "rb"
+    with Path(source).open(mode) as handle:
         os.fsync(handle.fileno())
     if os.name == "nt":
         _windows_move(source, target, replace=True)

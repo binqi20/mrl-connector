@@ -39,7 +39,14 @@ def local_cli_path(args, kwargs, flag="--output"):
     if "cwd" not in kwargs:
         raise AssertionError("lark-cli local path requires an explicit private cwd")
     cwd = Path(kwargs["cwd"])
-    if not cwd.is_dir() or cwd.stat().st_mode & 0o077:
+    if not cwd.is_dir():
+        raise AssertionError("lark-cli cwd must be an existing private directory")
+    if os.name == "nt":
+        try:
+            mrl._ensure_windows_private_acl(cwd)
+        except mrl.ConnectorError as exc:
+            raise AssertionError("lark-cli cwd must be an existing private directory") from exc
+    elif cwd.stat().st_mode & 0o077:
         raise AssertionError("lark-cli cwd must be an existing private directory")
     return cwd / supplied
 
