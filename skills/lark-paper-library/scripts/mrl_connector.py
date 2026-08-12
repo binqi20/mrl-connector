@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
-import fcntl
 import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -25,10 +26,77 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Sequence
-from urllib.parse import quote, urlsplit
+from urllib.parse import urlsplit
+
+if os.name == "nt":
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    _KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _ADVAPI32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    _KERNEL32.GetCurrentProcess.restype = wintypes.HANDLE
+    _KERNEL32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _KERNEL32.CloseHandle.restype = wintypes.BOOL
+    _KERNEL32.LocalFree.argtypes = [wintypes.HLOCAL]
+    _KERNEL32.LocalFree.restype = wintypes.HLOCAL
+    _KERNEL32.MoveFileExW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD]
+    _KERNEL32.MoveFileExW.restype = wintypes.BOOL
+    _KERNEL32.GetFileInformationByHandleEx.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    _KERNEL32.GetFileInformationByHandleEx.restype = wintypes.BOOL
+    _ADVAPI32.OpenProcessToken.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.HANDLE),
+    ]
+    _ADVAPI32.OpenProcessToken.restype = wintypes.BOOL
+    _ADVAPI32.GetTokenInformation.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    _ADVAPI32.GetTokenInformation.restype = wintypes.BOOL
+    _ADVAPI32.ConvertSidToStringSidW.argtypes = [
+        wintypes.LPVOID,
+        ctypes.POINTER(wintypes.LPWSTR),
+    ]
+    _ADVAPI32.ConvertSidToStringSidW.restype = wintypes.BOOL
+    _ADVAPI32.GetNamedSecurityInfoW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+        ctypes.POINTER(wintypes.LPVOID),
+    ]
+    _ADVAPI32.GetNamedSecurityInfoW.restype = wintypes.DWORD
+    _ADVAPI32.GetAclInformation.argtypes = [
+        wintypes.LPVOID,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.c_int,
+    ]
+    _ADVAPI32.GetAclInformation.restype = wintypes.BOOL
+    _ADVAPI32.GetAce.argtypes = [
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.LPVOID),
+    ]
+    _ADVAPI32.GetAce.restype = wintypes.BOOL
+else:
+    import fcntl
 
 
-VERSION = "1.1.2"
+VERSION = "1.1.3"
 EXIT_REFUSED = 2
 MAX_OPERATION = 15
 MAX_ROLLING = 80
@@ -83,6 +151,345 @@ class ConnectorError(RuntimeError):
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
+def _unsafe_link_or_reparse(path: Path) -> bool:
+    """Reject links and every Windows name-surrogate/reparse boundary."""
+
+    path = Path(path)
+    try:
+        if path.is_symlink():
+            return True
+        if os.name == "nt" and hasattr(os.path, "isjunction") and os.path.isjunction(path):
+            return True
+        attributes = getattr(os.lstat(path), "st_file_attributes", 0)
+        return bool(
+            os.name == "nt"
+            and attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        )
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise ConnectorError("filesystem path could not be validated safely") from exc
+
+
+def _windows_handle_is_reparse(descriptor: int) -> bool:
+    """Validate the opened Windows handle, closing the check/open race."""
+
+    if os.name != "nt":
+        return False
+    file_attribute_tag_info = 9
+
+    class FileAttributeTagInfo(ctypes.Structure):
+        _fields_ = [("file_attributes", wintypes.DWORD), ("reparse_tag", wintypes.DWORD)]
+
+    info = FileAttributeTagInfo()
+    handle = wintypes.HANDLE(msvcrt.get_osfhandle(descriptor))
+    if not _KERNEL32.GetFileInformationByHandleEx(
+        handle,
+        file_attribute_tag_info,
+        ctypes.byref(info),
+        ctypes.sizeof(info),
+    ):
+        raise ConnectorError("opened filesystem handle could not be validated safely")
+    return bool(info.file_attributes & 0x400)
+
+
+def _require_no_windows_reparse_components(path: Path) -> None:
+    """Fail closed if an existing Windows path component is a reparse point."""
+
+    if os.name != "nt":
+        return
+    current = Path(os.path.abspath(Path(path).expanduser()))
+    while True:
+        if _unsafe_link_or_reparse(current):
+            raise ConnectorError("filesystem path contains an unsafe reparse point")
+        if current.parent == current:
+            break
+        current = current.parent
+
+
+def _windows_current_sid() -> str:
+    """Return the current process user's SID without locale-sensitive parsing."""
+
+    if os.name != "nt":
+        raise ConnectorError("Windows security APIs are unavailable")
+    if sys.version_info < (3, 13):
+        raise ConnectorError("Windows requires Python 3.13 or newer")
+
+    token_query = 0x0008
+    token_user = 1
+    error_insufficient_buffer = 122
+    process = _KERNEL32.GetCurrentProcess()
+    token = wintypes.HANDLE()
+    if not _ADVAPI32.OpenProcessToken(
+        process, token_query, ctypes.byref(token)
+    ):
+        raise ConnectorError("Windows private-state identity could not be verified")
+    try:
+        needed = wintypes.DWORD()
+        ctypes.set_last_error(0)
+        _ADVAPI32.GetTokenInformation(
+            token, token_user, None, 0, ctypes.byref(needed)
+        )
+        if ctypes.get_last_error() not in {0, error_insufficient_buffer} or not needed.value:
+            raise ConnectorError("Windows private-state identity could not be verified")
+        buffer = ctypes.create_string_buffer(needed.value)
+        if not _ADVAPI32.GetTokenInformation(
+            token, token_user, buffer, needed, ctypes.byref(needed)
+        ):
+            raise ConnectorError("Windows private-state identity could not be verified")
+
+        class SidAndAttributes(ctypes.Structure):
+            _fields_ = [("sid", wintypes.LPVOID), ("attributes", wintypes.DWORD)]
+
+        sid_pointer = ctypes.cast(buffer, ctypes.POINTER(SidAndAttributes)).contents.sid
+        text_pointer = wintypes.LPWSTR()
+        if not _ADVAPI32.ConvertSidToStringSidW(
+            sid_pointer, ctypes.byref(text_pointer)
+        ):
+            raise ConnectorError("Windows private-state identity could not be verified")
+        try:
+            value = str(text_pointer.value or "")
+        finally:
+            _KERNEL32.LocalFree(ctypes.cast(text_pointer, wintypes.HLOCAL))
+        if not re.fullmatch(r"S-1-(?:\d+-)+\d+", value):
+            raise ConnectorError("Windows private-state identity could not be verified")
+        return value
+    finally:
+        _KERNEL32.CloseHandle(token)
+
+
+def _windows_private_acl_is_valid(path: Path, current_sid: str) -> bool:
+    """Verify that only the user, SYSTEM, or Administrators receive access."""
+
+    owner_security_information = 0x00000001
+    dacl_security_information = 0x00000004
+    se_file_object = 1
+    acl_size_information_class = 2
+    allowed_sids = {current_sid, "S-1-5-18", "S-1-5-32-544"}
+    write_or_delete_access = 0x00010116
+
+    class AclSizeInformation(ctypes.Structure):
+        _fields_ = [
+            ("ace_count", wintypes.DWORD),
+            ("acl_bytes_in_use", wintypes.DWORD),
+            ("acl_bytes_free", wintypes.DWORD),
+        ]
+
+    owner = wintypes.LPVOID()
+    dacl = wintypes.LPVOID()
+    descriptor = wintypes.LPVOID()
+    result = _ADVAPI32.GetNamedSecurityInfoW(
+        str(path),
+        se_file_object,
+        owner_security_information | dacl_security_information,
+        ctypes.byref(owner),
+        None,
+        ctypes.byref(dacl),
+        None,
+        ctypes.byref(descriptor),
+    )
+    if result != 0 or not owner or not dacl or not descriptor:
+        if descriptor:
+            _KERNEL32.LocalFree(ctypes.cast(descriptor, wintypes.HLOCAL))
+        return False
+
+    def sid_text(pointer: wintypes.LPVOID) -> str:
+        output = wintypes.LPWSTR()
+        if not _ADVAPI32.ConvertSidToStringSidW(pointer, ctypes.byref(output)):
+            return ""
+        try:
+            return str(output.value or "")
+        finally:
+            _KERNEL32.LocalFree(ctypes.cast(output, wintypes.HLOCAL))
+
+    try:
+        if sid_text(owner) != current_sid:
+            return False
+        information = AclSizeInformation()
+        if not _ADVAPI32.GetAclInformation(
+            dacl,
+            ctypes.byref(information),
+            ctypes.sizeof(information),
+            acl_size_information_class,
+        ):
+            return False
+        current_has_write_access = False
+        for index in range(information.ace_count):
+            ace = wintypes.LPVOID()
+            if not _ADVAPI32.GetAce(dacl, index, ctypes.byref(ace)):
+                return False
+            ace_type = ctypes.c_ubyte.from_address(ace.value).value
+            # Parse the simple ACCESS_ALLOWED_ACE_TYPE only. Reject every
+            # other allow-grant form rather than guessing a variable SID offset.
+            if ace_type == 0:
+                mask = ctypes.c_uint32.from_address(ace.value + 4).value
+                trustee = sid_text(wintypes.LPVOID(ace.value + 8))
+                # Read-only inherited grants do not expose secret contents for
+                # modification, but any unapproved writer/deleter does.
+                if trustee not in allowed_sids and mask & write_or_delete_access:
+                    return False
+                if trustee == current_sid and mask & (0x10000000 | write_or_delete_access):
+                    current_has_write_access = True
+            elif ace_type in {4, 5, 9, 11}:
+                return False
+        return current_has_write_access
+    finally:
+        _KERNEL32.LocalFree(ctypes.cast(descriptor, wintypes.HLOCAL))
+
+
+def _ensure_windows_private_acl(path: Path) -> None:
+    """Verify a private path using stable SID-based ACL rules."""
+
+    if os.name != "nt":
+        return
+    _require_no_windows_reparse_components(path)
+    current_sid = _windows_current_sid()
+    if _windows_private_acl_is_valid(path, current_sid):
+        return
+    raise ConnectorError("Windows private-state ACL is not owner-only")
+
+
+def _set_private_file(path: Path) -> None:
+    if os.name == "nt":
+        if not _windows_private_acl_is_valid(path, _windows_current_sid()):
+            raise ConnectorError("Windows private-state file ACL is not owner-only")
+    else:
+        os.chmod(path, 0o600)
+
+
+def _make_private_dir(path: Path) -> None:
+    """Create a private directory without permissive intermediate components."""
+
+    path = Path(path)
+    _require_no_windows_reparse_components(path.parent)
+    try:
+        path.mkdir(mode=0o700)
+    except FileNotFoundError as exc:
+        raise ConnectorError(
+            "private state parent is missing; create the owner-private parent first"
+        ) from exc
+    if os.name == "nt":
+        _ensure_windows_private_acl(path)
+    else:
+        os.chmod(path, 0o700)
+
+
+def _make_private_temp_dir(*, prefix: str, parent: Path) -> Path:
+    directory = Path(tempfile.mkdtemp(prefix=prefix, dir=parent))
+    if os.name == "nt":
+        _ensure_windows_private_acl(directory)
+    else:
+        os.chmod(directory, 0o700)
+    return directory
+
+
+def _set_private_descriptor(descriptor: int) -> None:
+    if os.name != "nt":
+        os.fchmod(descriptor, 0o600)
+
+
+def _sync_parent(path: Path) -> None:
+    """Durably record a POSIX directory mutation; Windows moves are write-through."""
+
+    if os.name == "nt":
+        return
+    directory = os.open(Path(path).parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def _windows_move(source: Path, target: Path, *, replace: bool) -> None:
+    flags = 0x00000008  # MOVEFILE_WRITE_THROUGH
+    if replace:
+        flags |= 0x00000001  # MOVEFILE_REPLACE_EXISTING
+    if not _KERNEL32.MoveFileExW(str(source), str(target), flags):
+        error = ctypes.get_last_error()
+        if not replace and (error in {5, 80, 183} and target.exists()):
+            raise FileExistsError(str(target))
+        raise ConnectorError("durable Windows file installation failed")
+
+
+def _durable_replace(source: Path, target: Path) -> None:
+    with Path(source).open("rb") as handle:
+        os.fsync(handle.fileno())
+    if os.name == "nt":
+        _windows_move(source, target, replace=True)
+    else:
+        os.replace(source, target)
+        _sync_parent(target)
+
+
+def _install_no_clobber(source: Path, target: Path) -> None:
+    """Install one verified file atomically without any copy/overwrite fallback."""
+
+    _require_no_windows_reparse_components(target.parent)
+    if target.exists() or target.is_symlink():
+        raise FileExistsError(str(target))
+    try:
+        if os.name == "nt":
+            _windows_move(source, target, replace=False)
+        else:
+            os.link(source, target)
+            _sync_parent(target)
+    except FileExistsError:
+        raise
+    except (OSError, ConnectorError) as exc:
+        raise ConnectorError("atomic no-clobber installation is unavailable") from exc
+
+
+def _durable_remove(path: Path) -> None:
+    path = Path(path)
+    if _unsafe_link_or_reparse(path) or not path.is_file():
+        raise ConnectorError("pending-log journal path is unsafe")
+    if os.name == "nt":
+        tombstone = path.with_name(f".{path.name}.cleared-{uuid.uuid4().hex}")
+        _windows_move(path, tombstone, replace=False)
+        try:
+            tombstone.unlink()
+        except OSError as exc:
+            raise ConnectorError("cleared journal tombstone could not be removed") from exc
+    else:
+        path.unlink()
+        _sync_parent(path)
+
+
+def _resolved_lark_executable(*, required: bool) -> str:
+    if os.name != "nt":
+        return "lark-cli"
+    # Prefer the official package's native binary.  A .cmd shim is not used:
+    # Windows may route batch files through a shell, which would weaken the
+    # connector's list-argument boundary for runtime tokens and paths.
+    candidates = [shutil.which("lark-cli.exe")]
+    shim = shutil.which("lark-cli.cmd") or shutil.which("lark-cli")
+    if shim:
+        shim_path = Path(shim)
+        package_roots = [
+            shim_path.parent / "node_modules" / "@larksuite" / "cli",
+            # npm's global Windows layout commonly keeps the package under
+            # node_modules while placing the .cmd shim in the prefix root.
+            shim_path.parent.parent / "node_modules" / "@larksuite" / "cli",
+        ]
+        for package_root in package_roots:
+            package_json = package_root / "package.json"
+            package_binary = package_root / "bin" / "lark-cli.exe"
+            if not package_json.is_file() or not package_binary.is_file():
+                continue
+            try:
+                package = json.loads(package_json.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if package.get("name") == "@larksuite/cli":
+                candidates.append(str(package_binary))
+    executable = next((item for item in candidates if item), None)
+    if executable:
+        return str(Path(executable).resolve())
+    if required:
+        raise ConnectorError("native lark-cli executable is unavailable")
+    return "lark-cli"
+
+
 def run_lark(
     args: Sequence[str],
     *,
@@ -100,7 +507,11 @@ def run_lark(
     }
     if cwd is not None:
         kwargs["cwd"] = cwd
-    return runner(["lark-cli", *args], **kwargs)
+    executable = _resolved_lark_executable(required=runner is subprocess.run)
+    try:
+        return runner([executable, *args], **kwargs)
+    except OSError as exc:
+        raise ConnectorError("lark-cli could not be started") from exc
 
 
 def _parse_json_process(process: subprocess.CompletedProcess[str], purpose: str) -> dict[str, Any]:
@@ -131,7 +542,8 @@ def _parse_time(value: str) -> datetime:
 @contextmanager
 def _readonly_connection(path: Path):
     resolved = path.resolve(strict=True)
-    uri = f"file:{quote(str(resolved), safe='/')}?mode=ro&immutable=1"
+    _require_no_windows_reparse_components(path)
+    uri = resolved.as_uri() + "?mode=ro&immutable=1"
     connection = sqlite3.connect(uri, uri=True)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA query_only=ON")
@@ -145,7 +557,7 @@ def validate_index(path: Path, *, now: datetime | None = None) -> dict[str, Any]
     """Validate an index completely and fail closed if it is stale."""
 
     path = Path(path)
-    if path.is_symlink() or not path.is_file():
+    if _unsafe_link_or_reparse(path) or not path.is_file():
         raise ConnectorError("index is missing or is not a regular file")
     if path.stat().st_size <= 0:
         raise ConnectorError("index is empty")
@@ -165,7 +577,7 @@ def validate_index(path: Path, *, now: datetime | None = None) -> dict[str, Any]
             columns = {row[1] for row in db.execute("PRAGMA table_info(mrl_index)")}
             missing = REQUIRED_COLUMNS - columns
             if missing:
-                raise ConnectorError("index schema is incompatible with connector v1.1.2")
+                raise ConnectorError("index schema is incompatible with connector v1.1.3")
             meta = dict(db.execute("SELECT key,value FROM index_meta"))
             built_at = _parse_time(meta.get("built_at", ""))
             age = current - built_at
@@ -264,13 +676,15 @@ def sha256_file(path: Path) -> str:
 
 def _secure_state_dir(path: Path) -> None:
     if path.exists():
-        if path.is_symlink() or not path.is_dir():
+        if _unsafe_link_or_reparse(path) or not path.is_dir():
             raise ConnectorError("private state path is unsafe")
-        if path.stat().st_mode & 0o077:
+        _require_no_windows_reparse_components(path)
+        if os.name == "nt":
+            _ensure_windows_private_acl(path)
+        elif path.stat().st_mode & 0o077:
             raise ConnectorError("private state directory permissions must be 0700")
         return
-    path.mkdir(parents=True, mode=0o700)
-    os.chmod(path, 0o700)
+    _make_private_dir(path)
 
 
 def fetch_index(file_token: str, output: Path, *, runner: Runner = subprocess.run) -> dict[str, Any]:
@@ -280,10 +694,9 @@ def fetch_index(file_token: str, output: Path, *, runner: Runner = subprocess.ru
         raise ConnectorError("index file token is required")
     output = Path(output).expanduser()
     _secure_state_dir(output.parent)
-    if output.exists() and (output.is_symlink() or not output.is_file()):
+    if output.exists() and (_unsafe_link_or_reparse(output) or not output.is_file()):
         raise ConnectorError("index destination is unsafe")
-    temp_dir = Path(tempfile.mkdtemp(prefix=".index-", dir=output.parent))
-    os.chmod(temp_dir, 0o700)
+    temp_dir = _make_private_temp_dir(prefix=".index-", parent=output.parent)
     candidate = temp_dir / "candidate.sqlite3"
     try:
         process = run_lark(
@@ -291,17 +704,12 @@ def fetch_index(file_token: str, output: Path, *, runner: Runner = subprocess.ru
             runner=runner,
             cwd=temp_dir,
         )
-        if process.returncode != 0 or not candidate.is_file() or candidate.is_symlink():
+        if process.returncode != 0 or not candidate.is_file() or _unsafe_link_or_reparse(candidate):
             raise ConnectorError("exact-token index download failed")
-        os.chmod(candidate, 0o600)
+        _set_private_file(candidate)
         result = validate_index(candidate)
-        os.replace(candidate, output)
-        os.chmod(output, 0o600)
-        directory = os.open(output.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        _durable_replace(candidate, output)
+        _set_private_file(output)
 
         return result
     finally:
@@ -374,10 +782,9 @@ def bootstrap(folder_url: str, output: Path, *, runner: Runner = subprocess.run)
     connect_token = _find_exact_drive_item(tracking_token, "CONNECT.md", "file", runner=runner)
     output = Path(output).expanduser()
     _secure_state_dir(output.parent)
-    if output.exists() and (output.is_symlink() or not output.is_file()):
+    if output.exists() and (_unsafe_link_or_reparse(output) or not output.is_file()):
         raise ConnectorError("private contract destination is unsafe")
-    temp_dir = Path(tempfile.mkdtemp(prefix=".connect-", dir=output.parent))
-    os.chmod(temp_dir, 0o700)
+    temp_dir = _make_private_temp_dir(prefix=".connect-", parent=output.parent)
     candidate = temp_dir / "CONNECT.md"
     try:
         process = run_lark(
@@ -385,7 +792,7 @@ def bootstrap(folder_url: str, output: Path, *, runner: Runner = subprocess.run)
             runner=runner,
             cwd=temp_dir,
         )
-        if process.returncode != 0 or candidate.is_symlink() or not candidate.is_file():
+        if process.returncode != 0 or _unsafe_link_or_reparse(candidate) or not candidate.is_file():
             raise ConnectorError("private contract download failed")
         size = candidate.stat().st_size
         if not 1 <= size <= 1024 * 1024:
@@ -396,10 +803,10 @@ def bootstrap(folder_url: str, output: Path, *, runner: Runner = subprocess.run)
             raise ConnectorError("private contract is not UTF-8 text") from exc
         if "mrl_connector.py" not in text or "--file-token" not in text or "--base-token" not in text:
             raise ConnectorError("private contract is missing required coordinates")
-        os.chmod(candidate, 0o600)
+        _set_private_file(candidate)
         digest = sha256_file(candidate)
-        os.replace(candidate, output)
-        os.chmod(output, 0o600)
+        _durable_replace(candidate, output)
+        _set_private_file(output)
         return {"status": "ready", "output": str(output), "sha256": digest}
     finally:
         if candidate.exists() or candidate.is_symlink():
@@ -625,10 +1032,13 @@ class PendingJournal:
         return self.path.exists() or self.path.is_symlink()
 
     def load(self) -> dict[str, Any]:
-        if self.path.is_symlink() or not self.path.is_file():
+        if _unsafe_link_or_reparse(self.path) or not self.path.is_file():
             raise ConnectorError("pending-log journal path is unsafe")
-        if self.path.stat().st_mode & 0o077:
+        _require_no_windows_reparse_components(self.path)
+        if os.name != "nt" and self.path.stat().st_mode & 0o077:
             raise ConnectorError("pending-log journal permissions must be 0600")
+        if os.name == "nt":
+            _ensure_windows_private_acl(self.path)
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
@@ -640,24 +1050,20 @@ class PendingJournal:
 
     def write(self, payload: dict[str, Any]) -> None:
         _secure_state_dir(self.path.parent)
-        if self.path.is_symlink():
+        if _unsafe_link_or_reparse(self.path):
             raise ConnectorError("pending-log journal path is unsafe")
         fd, temporary = tempfile.mkstemp(prefix=".pending-", dir=self.path.parent)
         temporary_path = Path(temporary)
         try:
-            os.fchmod(fd, 0o600)
+            _set_private_descriptor(fd)
             data = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode()
             os.write(fd, data)
             os.fsync(fd)
         finally:
             os.close(fd)
-        os.replace(temporary_path, self.path)
-        os.chmod(self.path, 0o600)
-        directory = os.open(self.path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        _set_private_file(temporary_path)
+        _durable_replace(temporary_path, self.path)
+        _set_private_file(self.path)
 
     def create(self, payload: dict[str, Any]) -> None:
         """Create a new journal without replacing any concurrent state."""
@@ -671,26 +1077,17 @@ class PendingJournal:
         except FileExistsError as exc:
             raise ConnectorError("an unresolved pending Download Log record blocks further downloads") from exc
         try:
+            _set_private_descriptor(descriptor)
             data = (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode()
             os.write(descriptor, data)
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
-        directory = os.open(self.path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        _set_private_file(self.path)
+        _sync_parent(self.path)
 
     def clear(self) -> None:
-        if self.path.is_symlink() or not self.path.is_file():
-            raise ConnectorError("pending-log journal path is unsafe")
-        self.path.unlink()
-        directory = os.open(self.path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        _durable_remove(self.path)
 
 
 @contextmanager
@@ -699,28 +1096,59 @@ def exclusive_state_lock(lock_path: Path, timeout_seconds: float = 30.0):
 
     lock_path = Path(lock_path).expanduser()
     _secure_state_dir(lock_path.parent)
+    _require_no_windows_reparse_components(lock_path)
+    if _unsafe_link_or_reparse(lock_path):
+        raise ConnectorError("download state lock is unsafe or unavailable")
     flags = os.O_RDWR | os.O_CREAT
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     try:
         descriptor = os.open(lock_path, flags, 0o600)
-        os.fchmod(descriptor, 0o600)
+        try:
+            if _windows_handle_is_reparse(descriptor):
+                raise ConnectorError("download state lock is unsafe or unavailable")
+        except Exception:
+            os.close(descriptor)
+            raise
+        _set_private_descriptor(descriptor)
+        if os.name == "nt":
+            if os.fstat(descriptor).st_size < 1:
+                os.write(descriptor, b"\0")
+                os.fsync(descriptor)
+            _set_private_file(lock_path)
     except OSError as exc:
         raise ConnectorError("download state lock is unsafe or unavailable") from exc
     deadline = time.monotonic() + timeout_seconds
+    locked = False
     try:
         while True:
             try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if os.name == "nt":
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+                else:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
                 break
-            except BlockingIOError:
+            except OSError as exc:
+                if os.name == "nt":
+                    contention = getattr(exc, "winerror", None) in {5, 33, 36} or exc.errno in {13}
+                else:
+                    contention = isinstance(exc, BlockingIOError)
+                if not contention:
+                    raise ConnectorError("download state lock is unsafe or unavailable") from exc
                 if time.monotonic() >= deadline:
                     raise ConnectorError("another download operation holds the state lock")
                 time.sleep(0.05)
         yield
     finally:
         try:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            if locked:
+                if os.name == "nt":
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
         finally:
             os.close(descriptor)
 
@@ -731,6 +1159,7 @@ def _safe_file_name(value: str) -> str:
         or name in {".", ".."}
         or Path(name).name != name
         or any(ord(character) < 32 for character in name)
+        or (os.name == "nt" and os.path.isreserved(name))
     ):
         raise ConnectorError("index contains an unsafe output file name")
     if not name.lower().endswith(".pdf"):
@@ -775,7 +1204,7 @@ def _safe_drive_path(value: str, file_name: str, match_method: str) -> str:
 
 
 def _pdf_matches(path: Path, size: int, sha256: str) -> bool:
-    if path.is_symlink() or not path.is_file() or path.stat().st_size != size:
+    if _unsafe_link_or_reparse(path) or not path.is_file() or path.stat().st_size != size:
         return False
     with path.open("rb") as handle:
         if handle.read(5) != b"%PDF-":
@@ -940,17 +1369,23 @@ def _download_files_locked(
     if validate_index(index, now=now)["sha256"] != validated["sha256"]:
         raise ConnectorError("index changed during download selection")
     output_dir = Path(output_dir).expanduser()
-    if output_dir.exists() and (output_dir.is_symlink() or not output_dir.is_dir()):
+    if output_dir.exists() and (_unsafe_link_or_reparse(output_dir) or not output_dir.is_dir()):
         raise ConnectorError("output directory is unsafe")
+    _require_no_windows_reparse_components(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    _require_no_windows_reparse_components(output_dir)
     targets: list[Path] = []
     for row in rows:
         name = _safe_file_name(row["file_name"])
         target = output_dir / name
-        if target.exists() or target.is_symlink():
+        if target.exists() or _unsafe_link_or_reparse(target):
             raise ConnectorError("a target PDF already exists; nothing was downloaded")
         targets.append(target)
-    if len(set(targets)) != len(targets):
+    target_keys = [
+        os.path.normcase(str(target)).casefold() if os.name == "nt" else str(target)
+        for target in targets
+    ]
+    if len(set(target_keys)) != len(target_keys):
         raise ConnectorError("selected PDFs have colliding output names")
     open_id, user_name = whoami(runner=runner)
     quota_rows = download_log_rows(base_token, open_id, runner=runner)
@@ -973,8 +1408,7 @@ def _download_files_locked(
     }
     store.create(payload)
     failures: list[str] = []
-    temp_dir = Path(tempfile.mkdtemp(prefix=".mrl-download-", dir=output_dir))
-    os.chmod(temp_dir, 0o700)
+    temp_dir = _make_private_temp_dir(prefix=".mrl-download-", parent=output_dir)
     try:
         for row, target in zip(rows, targets):
             temporary = temp_dir / f"{row['file_id']}.pdf"
@@ -991,7 +1425,7 @@ def _download_files_locked(
                     temporary.unlink()
                 failures.append(str(row["file_name"]))
                 continue
-            os.chmod(temporary, 0o600)
+            _set_private_file(temporary)
             payload["verified"].append({
                 "paper_id": int(row["paper_id"]),
                 "file_id": int(row["file_id"]),
@@ -999,12 +1433,13 @@ def _download_files_locked(
             })
             store.write(payload)
             try:
-                os.link(temporary, target)
+                _install_no_clobber(temporary, target)
             except FileExistsError as exc:
                 raise ConnectorError("target appeared during download; no file was overwritten") from exc
             with target.open("rb") as installed:
                 os.fsync(installed.fileno())
-            temporary.unlink()
+            if temporary.exists():
+                temporary.unlink()
         payload["state"] = "needs_log"
         store.write(payload)
         _finish_pending_log(base_token, store, payload, runner=runner)

@@ -1,4 +1,4 @@
-# Management Research Library — FAQ (connector v1.1.2)
+# Management Research Library — FAQ (connector v1.1.3)
 
 Coordinates are deliberately absent. The maintainer shares the library folder
 URL privately; `_tracking/CONNECT.md` supplies runtime tokens. Never place
@@ -99,6 +99,14 @@ No. The helper locks concurrent operations that share one local state
 directory, but the Base has no atomic cross-device quota reservation. To keep
 the 80-paper limit reliable, serialize downloads for the same Feishu account.
 
+**Does the connector support native Windows?**
+
+Yes, beginning with v1.1.3 and Python 3.13 or newer. The helper uses Windows
+byte-range locking, owner-private state ACLs, write-through file replacement,
+reserved-name and junction/reparse checks, and atomic no-clobber installation.
+It fails closed if those protections cannot be verified. Do not patch out a
+platform check or replace the reviewed helper with ad hoc commands.
+
 **What is the pending-download-log journal?**
 
 Before a remote PDF transfer, the helper creates a private durable journal. It
@@ -138,7 +146,7 @@ index by name or use Drive paper search.
 **Index is stale** — Ask the maintainer for an explicit MRL refresh. Do not
 bypass the seven-day policy.
 
-**Why might v1.1.2 refuse an older index?** — v1.1 requires the conservative
+**Why might v1.1.3 refuse an older index?** — v1.1 requires the conservative
 derived `publication_version` field. Maintainers publish and verify the
 compatible index before deploying the v1.1 connector and FAQ; see
 `DEPLOYMENT.md` in the public repository.

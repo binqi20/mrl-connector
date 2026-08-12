@@ -8,9 +8,12 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import textwrap
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -700,12 +703,261 @@ class DownloadTests(unittest.TestCase):
             self.assertTrue(journal_path.exists())
 
 
+class WindowsPortTests(unittest.TestCase):
+    def test_helper_imports_and_reports_v113(self):
+        imported = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import importlib.util,sys;"
+                "s=importlib.util.spec_from_file_location('connector',sys.argv[1]);"
+                "m=importlib.util.module_from_spec(s);s.loader.exec_module(m);"
+                "print(m.VERSION)",
+                str(SCRIPT),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(imported.returncode, 0, imported.stderr)
+        self.assertEqual(imported.stdout.strip(), "1.1.3")
+        version = subprocess.run(
+            [sys.executable, str(SCRIPT), "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(version.returncode, 0, version.stderr)
+        self.assertEqual(version.stdout.strip(), "1.1.3")
+
+    def test_paths_with_spaces_support_bootstrap_fetch_search_and_quota(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "connector state with spaces"
+            state = root / "private state with spaces"
+            state.mkdir(parents=True, mode=0o700)
+            os.chmod(state, 0o700)
+            source = root / "source index with spaces.sqlite3"
+            make_index(source, built_at=datetime.now(timezone.utc))
+
+            def fetch_runner(args, **kwargs):
+                target = Path(kwargs["cwd"]) / args[args.index("--output") + 1]
+                self.assertIn(" ", str(target))
+                shutil.copyfile(source, target)
+                return completed(args)
+
+            index = state / "local index with spaces.sqlite3"
+            self.assertEqual(mrl.fetch_index("runtime-token", index, runner=fetch_runner)["rows"], 1)
+            self.assertEqual(
+                [row["file_id"] for row in mrl.search_index(index, doi="10.1000/example")],
+                [11],
+            )
+
+            def bootstrap_runner(args, **kwargs):
+                if args[1:4] == ["drive", "files", "list"]:
+                    params = json.loads(args[args.index("--params") + 1])
+                    if params["folder_token"] == "rootfolder123":
+                        files = [{"name": "_tracking", "type": "folder", "token": "tracking-token"}]
+                    else:
+                        files = [{"name": "CONNECT.md", "type": "file", "token": "connect-token"}]
+                    return completed(args, payload={"ok": True, "data": {"files": files, "has_more": False}})
+                target = Path(kwargs["cwd"]) / args[args.index("--output") + 1]
+                self.assertIn(" ", str(target))
+                target.write_text(
+                    "mrl_connector.py --file-token runtime --base-token runtime\n",
+                    encoding="utf-8",
+                )
+                return completed(args)
+
+            contract = state / "private contract with spaces.md"
+            result = mrl.bootstrap(
+                "https://private.invalid/drive/folder/rootfolder123",
+                contract,
+                runner=bootstrap_runner,
+            )
+            self.assertEqual(result["status"], "ready")
+            self.assertTrue(contract.is_file())
+
+            def quota_runner(args, **kwargs):
+                return completed(args, payload=base_payload([]))
+
+            rows = mrl.download_log_rows("runtime-base", "ou_test", runner=quota_runner)
+            self.assertEqual(mrl.quota_usage(rows, now=NOW), (0, None))
+
+    def test_state_lock_times_out_across_processes_then_releases(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lock_path = Path(directory) / "state with spaces" / "download.lock"
+            holder = textwrap.dedent(
+                """
+                import importlib.util
+                import sys
+                from pathlib import Path
+                spec = importlib.util.spec_from_file_location("connector", sys.argv[1])
+                connector = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(connector)
+                with connector.exclusive_state_lock(Path(sys.argv[2]), timeout_seconds=2):
+                    print("locked", flush=True)
+                    sys.stdin.readline()
+                """
+            )
+            process = subprocess.Popen(
+                [sys.executable, "-c", holder, str(SCRIPT), str(lock_path)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                self.assertEqual(process.stdout.readline().strip(), "locked")
+                started = time.monotonic()
+                with self.assertRaisesRegex(mrl.ConnectorError, "holds the state lock"):
+                    with mrl.exclusive_state_lock(lock_path, timeout_seconds=0.2):
+                        self.fail("a second process must not enter the critical section")
+                self.assertGreaterEqual(time.monotonic() - started, 0.15)
+                process.stdin.write("release\n")
+                process.stdin.flush()
+                _, stderr = process.communicate(timeout=5)
+                self.assertEqual(process.returncode, 0, stderr)
+                with mrl.exclusive_state_lock(lock_path, timeout_seconds=1):
+                    pass
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate()
+
+    def test_invalid_pdf_is_not_installed(self):
+        invalid_pdf = b"not-a-pdf\n%%EOF\n"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            index = root / "index.sqlite3"
+            make_index(index)
+            state = root / "state"
+            state.mkdir(mode=0o700)
+
+            def runner(args, **kwargs):
+                if args[1] == "whoami":
+                    return completed(args, payload={"onBehalfOf": {"openId": "ou_test", "userName": "Tester"}})
+                if args[1:3] == ["base", "+record-search"]:
+                    return completed(args, payload=base_payload([]))
+                if args[1:3] == ["drive", "+download"]:
+                    (Path(kwargs["cwd"]) / args[args.index("--output") + 1]).write_bytes(invalid_pdf)
+                    return completed(args)
+                raise AssertionError(args)
+
+            result = mrl.download_files(
+                index, [11], root / "papers with spaces", "base", "Codex Desktop",
+                state / "pending.json", runner=runner, now=NOW, lock_path=state / "lock",
+            )
+            self.assertEqual(result["verified"], 0)
+            self.assertEqual(result["failed"], ["Valid Paper.pdf"])
+            self.assertFalse((root / "papers with spaces" / "Valid Paper.pdf").exists())
+            self.assertFalse((state / "pending.json").exists())
+
+    def test_target_created_during_download_is_not_overwritten(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            index = root / "index.sqlite3"
+            make_index(index)
+            output = root / "papers"
+            state = root / "state"
+            state.mkdir(mode=0o700)
+            target = output / "Valid Paper.pdf"
+
+            def runner(args, **kwargs):
+                if args[1] == "whoami":
+                    return completed(args, payload={"onBehalfOf": {"openId": "ou_test", "userName": "Tester"}})
+                if args[1:3] == ["base", "+record-search"]:
+                    return completed(args, payload=base_payload([]))
+                if args[1:3] == ["drive", "+download"]:
+                    (Path(kwargs["cwd"]) / args[args.index("--output") + 1]).write_bytes(PDF_BYTES)
+                    target.write_bytes(b"race winner")
+                    return completed(args)
+                raise AssertionError(args)
+
+            with self.assertRaisesRegex(mrl.ConnectorError, "target appeared"):
+                mrl.download_files(
+                    index, [11], output, "base", "Codex Desktop", state / "pending.json",
+                    runner=runner, now=NOW, lock_path=state / "lock",
+                )
+            self.assertEqual(target.read_bytes(), b"race winner")
+            self.assertTrue((state / "pending.json").exists())
+
+    @unittest.skipUnless(os.name == "nt", "native Windows command resolution")
+    def test_run_lark_resolves_native_binary_behind_lark_cli_cmd_without_shell(self):
+        with tempfile.TemporaryDirectory(prefix="cli path with spaces ") as directory:
+            command = Path(directory) / "lark-cli.cmd"
+            command.write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
+            native = (
+                Path(directory) / "node_modules" / "@larksuite" / "cli" /
+                "bin" / "lark-cli.exe"
+            )
+            native.parent.mkdir(parents=True)
+            native.write_bytes(b"fixture")
+            (native.parents[0] / "package.json").write_text(
+                '{"name":"@larksuite/cli","version":"fixture"}',
+                encoding="utf-8",
+            )
+            seen = []
+
+            def runner(args, **kwargs):
+                seen.append((args, kwargs))
+                return completed(args)
+
+            with mock.patch.dict(os.environ, {"PATH": directory + os.pathsep + os.environ.get("PATH", "")}):
+                mrl.run_lark(["--version"], runner=runner)
+            self.assertEqual(Path(seen[0][0][0]).resolve(), native.resolve())
+            self.assertFalse(seen[0][1].get("shell", False))
+
+    @unittest.skipUnless(os.name == "nt", "Windows path rules")
+    def test_windows_device_ads_and_trailing_names_are_rejected(self):
+        for unsafe_name in (
+            "CON.pdf", "AUX.PDF", "COM1.pdf", "LPT9.pdf",
+            "paper:stream.pdf", "paper.pdf ", "paper.pdf.",
+        ):
+            with self.subTest(name=unsafe_name), tempfile.TemporaryDirectory() as directory:
+                index = Path(directory) / "index.sqlite3"
+                make_index(index)
+                db = sqlite3.connect(index)
+                db.execute(
+                    "UPDATE mrl_index SET file_name=?,drive_path=?",
+                    (unsafe_name, "batch/" + unsafe_name),
+                )
+                db.commit()
+                db.close()
+                with self.assertRaises(mrl.ConnectorError):
+                    mrl.validate_index(index, now=NOW)
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction semantics")
+    def test_junction_state_directory_is_rejected_before_remote_access(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "real private state"
+            target.mkdir()
+            junction = root / "junction state"
+            created = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(junction), str(target)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if created.returncode != 0:
+                self.skipTest("this Windows runner cannot create a directory junction")
+            calls = []
+
+            def runner(args, **kwargs):
+                calls.append(args)
+                raise AssertionError("unsafe state must be refused before remote access")
+
+            with self.assertRaises(mrl.ConnectorError):
+                mrl.fetch_index("runtime-token", junction / "index.sqlite3", runner=runner)
+            self.assertEqual(calls, [])
+
+
 class PublicContractTests(unittest.TestCase):
     def test_frontmatter_version_is_exact(self):
         text = (ROOT / "skills/lark-paper-library/SKILL.md").read_text(encoding="utf-8")
         frontmatter = text.split("---", 2)[1]
-        self.assertIn("\nversion: 1.1.2\n", "\n" + frontmatter)
-        self.assertEqual(mrl.VERSION, "1.1.2")
+        self.assertIn("\nversion: 1.1.3\n", "\n" + frontmatter)
+        self.assertEqual(mrl.VERSION, "1.1.3")
 
     def test_public_tree_has_no_forbidden_fallbacks(self):
         files = [ROOT / "AGENTS.md", ROOT / "README.md", ROOT / "FAQ.md", ROOT / "DEPLOYMENT.md", ROOT / "skills/lark-paper-library/SKILL.md", SCRIPT]
@@ -716,7 +968,7 @@ class PublicContractTests(unittest.TestCase):
 
     def test_deployment_order_and_direct_faq_input_are_explicit(self):
         text = (ROOT / "DEPLOYMENT.md").read_text(encoding="utf-8")
-        release_step = "publish the v1.1.2 connector contract and FAQ"
+        release_step = "publish the v1.1.3 connector"
         self.assertIn(release_step, text)
         if release_step in text:
             self.assertLess(

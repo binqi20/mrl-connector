@@ -1,6 +1,6 @@
 ---
 name: lark-paper-library
-version: 1.1.2
+version: 1.1.3
 description: "Search and download academic PDFs from the Management Research Library through a validated SQLite catalog, authoritative quotas, and hash-verified no-clobber installation."
 metadata:
   requires:
@@ -18,6 +18,9 @@ Use it for index retrieval, search, quota checks, PDF downloads, and pending-log
 reconciliation. Do not replace its checks with ad hoc shell commands.
 
 ## Step 0 — Install prerequisites
+
+Native Windows requires Python 3.13 or newer. macOS and Linux continue to use
+the established POSIX safety path.
 
 ```bash
 npx @larksuite/cli@latest install
@@ -187,7 +190,7 @@ python3 "$HELPER" download \
 
 The helper revalidates index freshness, refuses any pre-existing target,
 rechecks the authoritative quota, downloads to a private temporary directory,
-validates bytes, installs with an atomic no-clobber link, and appends the real
+validates bytes, installs with an atomic no-clobber operation, and appends the real
 verified count to Base. Report requested, verified, and failed counts from the
 helper output rather than inferred counts.
 
