@@ -161,11 +161,30 @@ class IndexTests(unittest.TestCase):
             with self.assertRaisesRegex(mrl.ConnectorError, "no searchable ASCII"):
                 mrl.search_index(path, title="战略管理", now=NOW)
 
+    def test_index_remains_searchable_through_exactly_35_days(self):
+        for age in (timedelta(days=8), timedelta(days=35, seconds=-1), timedelta(days=35)):
+            with self.subTest(age=age), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "index.sqlite3"
+                make_index(path, built_at=NOW - age)
+                result = mrl.validate_index(path, now=NOW)
+                self.assertEqual(result["age_seconds"], int(age.total_seconds()))
+                rows = mrl.search_index(path, doi="10.1000/example", now=NOW)
+                self.assertEqual([row["file_id"] for row in rows], [11])
+
     def test_stale_index_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "index.sqlite3"
-            make_index(path, built_at=NOW - timedelta(days=7, seconds=1))
-            with self.assertRaisesRegex(mrl.ConnectorError, "7-day"):
+            make_index(path, built_at=NOW - timedelta(days=35, seconds=1))
+            with self.assertRaisesRegex(mrl.ConnectorError, "35-day"):
+                mrl.validate_index(path, now=NOW)
+            with self.assertRaisesRegex(mrl.ConnectorError, "35-day"):
+                mrl.search_index(path, doi="10.1000/example", now=NOW)
+
+    def test_future_index_still_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "index.sqlite3"
+            make_index(path, built_at=NOW + timedelta(minutes=5, seconds=1))
+            with self.assertRaisesRegex(mrl.ConnectorError, "in the future"):
                 mrl.validate_index(path, now=NOW)
 
     def test_unknown_is_valid_but_unrecognized_value_is_not(self):
@@ -362,6 +381,33 @@ class IndexTests(unittest.TestCase):
                 self.assertEqual(oct(output.stat().st_mode & 0o777), "0o600")
             self.assertIn("exact-runtime-token", seen[0])
             self.assertNotIn("+search", seen[0])
+
+    def test_fetch_preserves_build_time_and_refuses_expired_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state"
+            state.mkdir(mode=0o700)
+            source = root / "source.sqlite3"
+            built_at = datetime.now(timezone.utc) - timedelta(days=34)
+            make_index(source, built_at=built_at)
+            output = state / "mrl-index.sqlite3"
+
+            def runner(args, **kwargs):
+                shutil.copyfile(source, local_cli_path(args, kwargs))
+                return completed(args)
+
+            result = mrl.fetch_index("exact-runtime-token", output, runner=runner)
+            self.assertEqual(result["built_at"], built_at.isoformat())
+            original = output.read_bytes()
+            self.assertEqual(original, source.read_bytes())
+            with sqlite3.connect(source) as db:
+                db.execute(
+                    "UPDATE index_meta SET value=? WHERE key='built_at'",
+                    ((datetime.now(timezone.utc) - timedelta(days=36)).isoformat(),),
+                )
+            with self.assertRaisesRegex(mrl.ConnectorError, "35-day"):
+                mrl.fetch_index("exact-runtime-token", output, runner=runner)
+            self.assertEqual(output.read_bytes(), original)
 
 
 class BootstrapTests(unittest.TestCase):
@@ -764,6 +810,23 @@ class IdentityTests(unittest.TestCase):
 
 
 class DownloadTests(unittest.TestCase):
+    def test_expired_index_blocks_download_before_remote_access(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            index = root / "index.sqlite3"
+            make_index(index, built_at=NOW - timedelta(days=35, seconds=1))
+            state = root / "state"
+            runner = mock.Mock(side_effect=AssertionError("remote access must not occur"))
+            with self.assertRaisesRegex(mrl.ConnectorError, "35-day"):
+                mrl.download_files(
+                    index, [11], root / "papers", "base", "Codex Desktop",
+                    state / "pending.json", runner=runner, now=NOW,
+                    lock_path=state / "lock",
+                )
+            runner.assert_not_called()
+            self.assertFalse((state / "pending.json").exists())
+            self.assertFalse((root / "papers").exists())
+
     def test_state_lock_serializes_same_device_operations(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory) / "state"
@@ -948,7 +1011,7 @@ class DownloadTests(unittest.TestCase):
 
 
 class WindowsPortTests(unittest.TestCase):
-    def test_helper_imports_and_reports_v114(self):
+    def test_helper_imports_and_reports_v115(self):
         imported = subprocess.run(
             [
                 sys.executable,
@@ -964,7 +1027,7 @@ class WindowsPortTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(imported.returncode, 0, imported.stderr)
-        self.assertEqual(imported.stdout.strip(), "1.1.4")
+        self.assertEqual(imported.stdout.strip(), "1.1.5")
         version = subprocess.run(
             [sys.executable, str(SCRIPT), "--version"],
             capture_output=True,
@@ -972,7 +1035,7 @@ class WindowsPortTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(version.returncode, 0, version.stderr)
-        self.assertEqual(version.stdout.strip(), "1.1.4")
+        self.assertEqual(version.stdout.strip(), "1.1.5")
 
     def test_paths_with_spaces_support_bootstrap_fetch_search_and_quota(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1326,8 +1389,8 @@ class PublicContractTests(unittest.TestCase):
     def test_frontmatter_version_is_exact(self):
         text = (ROOT / "skills/lark-paper-library/SKILL.md").read_text(encoding="utf-8")
         frontmatter = text.split("---", 2)[1]
-        self.assertIn("\nversion: 1.1.4\n", "\n" + frontmatter)
-        self.assertEqual(mrl.VERSION, "1.1.4")
+        self.assertIn("\nversion: 1.1.5\n", "\n" + frontmatter)
+        self.assertEqual(mrl.VERSION, "1.1.5")
 
     def test_documented_user_oauth_scopes_are_exact_minimum(self):
         text = (ROOT / "skills/lark-paper-library/SKILL.md").read_text(encoding="utf-8")
@@ -1369,7 +1432,7 @@ class PublicContractTests(unittest.TestCase):
 
     def test_deployment_order_and_direct_faq_input_are_explicit(self):
         text = (ROOT / "DEPLOYMENT.md").read_text(encoding="utf-8")
-        release_step = "publish the v1.1.4 connector"
+        release_step = "publish the v1.1.5 connector"
         self.assertIn(release_step, text)
         if release_step in text:
             self.assertLess(

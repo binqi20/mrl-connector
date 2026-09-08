@@ -1,4 +1,4 @@
-# Management Research Library — Connector v1.1.4
+# Management Research Library — Connector v1.1.5
 
 Connect an AI agent to the Management Research Library, a shared read-only
 Feishu (Lark) collection of academic PDFs indexed by a verified SQLite catalog.
@@ -10,12 +10,14 @@ URL privately. The private `_tracking/CONNECT.md` supplies runtime coordinates.
 
 ## Safety model
 
-Connector v1.1.4 is fail closed:
+Connector v1.1.5 is fail closed:
 
 - Paper search uses only a validated SQLite index; it never crawls Drive or
   falls back to filename search.
-- A missing, invalid, incompatible, or more-than-seven-days-old index blocks
-  search and download.
+- A missing, invalid, incompatible, or stale index blocks search and download.
+  The freshness limit is 35 days (35 × 24 hours) from the original `built_at`;
+  downloading the index again does not reset its age. Fetch and validate the
+  index once per session.
 - The shared Download Log Base is the only quota authority. Every matching page
   is read; an unavailable or malformed ledger blocks downloads.
 - Server timestamps accept the historical Asia/Shanghai representation and
@@ -28,6 +30,8 @@ Connector v1.1.4 is fail closed:
   platform's process-wide file lock, owner-private state permissions, durable
   replacement, junction/reparse checks, and atomic no-clobber installation;
   macOS and Linux retain the established POSIX security behavior.
+  Windows validation is deferred for v1.1.5; this release is unverified on
+  Windows.
 - A read-only `state-check` distinguishes a safely creatable absent state from
   unsafe ownership, inherited allow ACEs, unreadable ACLs, and reparse points.
   It never creates a directory or repairs an ACL.
@@ -83,7 +87,7 @@ Never include library coordinates or credentials in either channel.
 
 Deployment is deliberately ordered: validate the existing compatible v1.1
 index with the reviewed helper first, then overwrite CONNECT and the reviewed
-FAQ in place, and publish the public v1.1.4 repository release last. See
+FAQ in place, and publish the public v1.1.5 repository release last. See
 [DEPLOYMENT.md](DEPLOYMENT.md) for the decision-complete order and
 byte-identical FAQ readback procedure.
 

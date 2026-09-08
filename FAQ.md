@@ -1,4 +1,4 @@
-# Management Research Library — FAQ (connector v1.1.4)
+# Management Research Library — FAQ (connector v1.1.5)
 
 Coordinates are deliberately absent. The maintainer shares the library folder
 URL privately; `_tracking/CONNECT.md` supplies runtime tokens. Never place
@@ -29,9 +29,10 @@ Drive file, folder, index, or document.
 
 **How does search work?**
 
-The helper downloads the exact pinned SQLite index token to a private temporary
-file, validates it, and searches it locally by DOI, title, author, year,
-journal, or keyword. It never crawls or searches the paper folders.
+At the start of each session, the helper downloads the exact pinned SQLite
+index token to a private temporary file, validates it, and searches it locally
+by DOI, title, author, year, journal, or keyword. It never crawls or searches
+the paper folders.
 
 **How are titles normalized?**
 
@@ -50,8 +51,9 @@ row count, or invalid file identity makes the index unusable.
 
 **What if the index is old?**
 
-An index older than seven 24-hour days is not merely a warning: search and
-download fail closed until the maintainer publishes a fresh valid index.
+An index older than 35 days (35 × 24 hours from its original `built_at`) blocks
+search and download until the maintainer publishes a fresh valid index.
+Downloading the index again does not reset its age.
 
 **What if several results look plausible?**
 
@@ -110,6 +112,8 @@ reserved-name and junction/reparse checks, and atomic no-clobber installation.
 It fails closed if those protections cannot be verified. Do not patch out a
 platform check or replace the reviewed helper with ad hoc commands.
 
+Windows validation is deferred for v1.1.5; this release is unverified on Windows.
+
 Before bootstrap, run `state-check` for the intended `.mrl` directory. Do not
 pre-create `.mrl` with Explorer or ordinary PowerShell. Let Python 3.13 and the
 connector create an absent directory with a protected ACL. The connector never
@@ -163,9 +167,9 @@ content inspection and separate approval.
 index by name or use Drive paper search.
 
 **Index is stale** — Ask the maintainer for an explicit MRL refresh. Do not
-bypass the seven-day policy.
+bypass the 35-day policy.
 
-**Why might v1.1.4 refuse an older index?** — v1.1 requires the conservative
+**Why might v1.1.5 refuse an older index?** — v1.1 requires the conservative
 derived `publication_version` field. Maintainers publish and verify the
 compatible index before deploying the v1.1 connector and FAQ; see
 `DEPLOYMENT.md` in the public repository.

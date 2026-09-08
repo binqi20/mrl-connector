@@ -1,4 +1,4 @@
-# Agent instructions — Management Research Library connector v1.1.4
+# Agent instructions — Management Research Library connector v1.1.5
 
 Read and follow [`skills/lark-paper-library/SKILL.md`](skills/lark-paper-library/SKILL.md)
 exactly. Use its tested helper; do not recreate the workflow with ad hoc shell
@@ -10,8 +10,10 @@ in public source, issues, logs, or responses.
 
 Contract summary:
 
-1. Search only a validated, compatible SQLite index no older than seven days.
-   Never crawl/search Drive as a fallback.
+1. Search only a validated, compatible SQLite index no older than 35 days
+   (35 × 24 hours) from its original `built_at`. Fetch it once per session;
+   fetching it again does not reset its age. Never crawl/search Drive as a
+   fallback.
 2. Library Drive is read-only. Only Download Log and feedback Base appends are
    permitted.
 3. At most 15 PDFs per operation and 80 per rolling 30 hours per user. Read the
@@ -27,6 +29,6 @@ Contract summary:
    controlled refusal.
 
 Maintainers must follow [`DEPLOYMENT.md`](DEPLOYMENT.md): validate the compatible
-v1.1 index with the reviewed v1.1.4 helper first, publish connector/FAQ second,
+v1.1 index with the reviewed v1.1.5 helper first, publish connector/FAQ second,
 and publish the public release last. The reviewed root `FAQ.md` is the direct
 deterministic FAQ publication input.

@@ -96,12 +96,12 @@ else:
     import fcntl
 
 
-VERSION = "1.1.4"
+VERSION = "1.1.5"
 EXIT_REFUSED = 2
 MAX_OPERATION = 15
 MAX_ROLLING = 80
 ROLLING_HOURS = 30
-MAX_INDEX_AGE = timedelta(days=7)
+MAX_INDEX_AGE = timedelta(days=35)
 TZ8 = timezone(timedelta(hours=8))
 VALID_VERSIONS = {
     "official_published_issue_pdf",
@@ -651,14 +651,14 @@ def validate_index(path: Path, *, now: datetime | None = None) -> dict[str, Any]
             columns = {row[1] for row in db.execute("PRAGMA table_info(mrl_index)")}
             missing = REQUIRED_COLUMNS - columns
             if missing:
-                raise ConnectorError("index schema is incompatible with connector v1.1.4")
+                raise ConnectorError("index schema is incompatible with connector v1.1.5")
             meta = dict(db.execute("SELECT key,value FROM index_meta"))
             built_at = _parse_time(meta.get("built_at", ""))
             age = current - built_at
             if age < -timedelta(minutes=5):
                 raise ConnectorError("index built_at is implausibly in the future")
             if age > MAX_INDEX_AGE:
-                raise ConnectorError("index is older than the 7-day freshness policy")
+                raise ConnectorError("index is older than the 35-day freshness policy")
             count = int(db.execute("SELECT COUNT(*) FROM mrl_index").fetchone()[0])
             try:
                 declared = int(meta.get("rows", ""))

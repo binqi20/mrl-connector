@@ -1,6 +1,6 @@
 ---
 name: lark-paper-library
-version: 1.1.4
+version: 1.1.5
 description: "Search and download academic PDFs from the Management Research Library through a validated SQLite catalog, authoritative quotas, and hash-verified no-clobber installation."
 metadata:
   requires:
@@ -93,8 +93,8 @@ name, crawl paper folders, or search Drive as a substitute.
    library or `_tracking` file. The only permitted writes are appends to the
    `download_log` and `feedback` tables.
 2. **Index only.** Search only a locally downloaded SQLite index that passes
-   integrity, schema, uniqueness, row-count, and seven-day freshness checks.
-   Missing, invalid, incompatible, or older-than-seven-days means stop.
+   integrity, schema, uniqueness, row-count, and 35-day freshness checks.
+   Missing, invalid, incompatible, or older than 35 days means stop.
 3. **No identity guessing.** For zero or multiple plausible results, show the
    candidates (title, authors, year, journal, DOI) and let the user choose.
 4. **At most 15 PDFs per operation** and **80 PDFs in a rolling 30 hours** per
@@ -133,7 +133,9 @@ python3 "$HELPER" fetch-index \
 
 The helper downloads by the exact pinned token into a private temporary file,
 validates it, and only then atomically replaces the local index. It refuses an
-index that is older than seven days. Do not continue on exit code `2`.
+index that is older than 35 days (35 × 24 hours from its original `built_at`).
+Fetching the index again does not reset its age. Do not continue on exit code
+`2`.
 
 You may revalidate without network access:
 
